@@ -1,0 +1,1196 @@
+from __future__ import annotations
+
+import csv
+import io
+import base64
+from email.message import EmailMessage
+from html import escape
+import re
+import textwrap
+from datetime import datetime
+from html.parser import HTMLParser
+from pathlib import Path
+from statistics import median
+from urllib.parse import quote
+
+import altair as alt
+import pandas as pd
+import requests
+import streamlit as st
+from PIL import Image, ImageDraw, ImageFont
+
+
+SHEET_CSV_URL = (
+    "https://docs.google.com/spreadsheets/d/e/"
+    "2PACX-1vRkSXELpOMNXtcw7spAk_1HwJT--CvPi2q-5vWM7QVycb24WWowaOHB1AUi32m4qT162ZH9bozMEQO7/"
+    "pub?gid=1055031371&single=true&output=csv"
+)
+LOGO_PATH = Path(__file__).resolve().parent / "assets" / "khair-logo.png"
+BAHRAIN_GOLD_URL = "https://gulfnews.com/gold-forex/bahrain-gold-prices"
+HOLDINGS = {
+    "22K gold": {"karat": 22, "grams": 7.7, "cost": 430.0},
+    "24K biscuit": {"karat": 24, "grams": 10.0, "cost": 621.0},
+}
+MONTH_RE = re.compile(r"^[A-Za-z]{3}-\d{2}$")
+MONEY_RE = re.compile(r"^[+-]?(?:\d[\d,]*\.?\d*|\.\d+)$")
+
+st.set_page_config(
+    page_title="Khair · Group Fund",
+    page_icon=":material/monitoring:",
+    layout="wide",
+    initial_sidebar_state="collapsed",
+)
+
+
+def cell_number(value: str | None) -> float | None:
+    """Parse sheet currency, including accounting-style negatives."""
+    if value is None:
+        return None
+    value = value.strip().replace("\u00a0", "")
+    if not value or value in {"-", "–", "—"}:
+        return None
+    negative = value.startswith("(") and value.endswith(")")
+    raw = value[1:-1] if negative else value
+    raw = raw.replace(",", "").replace("BHD", "").strip()
+    if not MONEY_RE.match(raw):
+        return None
+    number = float(raw)
+    return -number if negative else number
+
+
+def parse_sheet(text: str) -> dict:
+    rows = list(csv.reader(io.StringIO(text.lstrip("\ufeff"))))
+    header_index = next(
+        (
+            i
+            for i, row in enumerate(rows)
+            if any(cell.strip().lower() == "name" for cell in row)
+            and sum(bool(MONTH_RE.match(cell.strip())) for cell in row) > 1
+        ),
+        None,
+    )
+    if header_index is None:
+        raise ValueError("The CSV does not contain a Name column and month columns.")
+
+    header = [cell.strip() for cell in rows[header_index]]
+    name_index = next(i for i, cell in enumerate(header) if cell.lower() == "name")
+    month_indices = [i for i, cell in enumerate(header) if MONTH_RE.match(cell)]
+    months = [header[i] for i in month_indices]
+    registration_index = next(
+        (i for i, cell in enumerate(header) if cell.lower().startswith("reg")), None
+    )
+    phone_index = next(
+        (
+            i
+            for i, cell in enumerate(header)
+            if re.search(r"phone|whats.?app|mobile|contact", cell, re.IGNORECASE)
+        ),
+        None,
+    )
+    email_index = next(
+        (
+            i
+            for i, cell in enumerate(header)
+            if re.search(r"e.?mail", cell, re.IGNORECASE)
+        ),
+        None,
+    )
+
+    members: list[dict] = []
+    next_row = header_index + 1
+    for row in rows[next_row:]:
+        name = row[name_index].strip() if name_index < len(row) else ""
+        if not name:
+            break
+        payments = [
+            cell_number(row[i] if i < len(row) else None) or 0.0
+            for i in month_indices
+        ]
+        registration = (
+            cell_number(row[registration_index])
+            if registration_index is not None and registration_index < len(row)
+            else None
+        )
+        phone = (
+            row[phone_index].strip()
+            if phone_index is not None and phone_index < len(row)
+            else ""
+        )
+        email = (
+            row[email_index].strip()
+            if email_index is not None and email_index < len(row)
+            else ""
+        )
+        member = {
+            "Name": name,
+            "Registration fee": registration or 0.0,
+            "Phone": phone,
+            "Email": email,
+        }
+        member.update({month: amount for month, amount in zip(months, payments)})
+        member["Paid months"] = sum(amount > 0 for amount in payments)
+        member["Monthly contributions"] = sum(payments)
+        members.append(member)
+        next_row += 1
+
+    if not members:
+        raise ValueError("The sheet has month headers but no member rows.")
+
+    amounts = [
+        member[month]
+        for member in members
+        for month in months
+        if member[month] > 0
+    ]
+    monthly_fee = median(amounts) if amounts else 10.0
+
+    ledger: dict[str, float] = {}
+    known_labels = (
+        "reg. fee",
+        "meeting exp.",
+        "total collection",
+        "gold",
+        "kuri",
+        "rounding",
+        "balance",
+    )
+    for row in rows[next_row:]:
+        for index, cell in enumerate(row):
+            label = cell.strip().lower()
+            if label in known_labels:
+                value = next(
+                    (
+                        parsed
+                        for candidate in row[index + 1 :]
+                        if (parsed := cell_number(candidate)) is not None
+                    ),
+                    None,
+                )
+                if value is not None:
+                    ledger[label] = value
+                break
+
+    monthly = []
+    for month in months:
+        collected = sum(member[month] for member in members)
+        monthly.append(
+            {
+                "Month": month,
+                "Collected (BHD)": collected,
+                "Paid members": sum(member[month] > 0 for member in members),
+                "Expected (BHD)": len(members) * monthly_fee,
+            }
+        )
+
+    return {
+        "members": pd.DataFrame(members),
+        "months": months,
+        "monthly": pd.DataFrame(monthly),
+        "ledger": ledger,
+        "monthly_fee": monthly_fee,
+        "has_phone_column": phone_index is not None,
+        "has_email_column": email_index is not None,
+        "loaded_at": datetime.now().astimezone(),
+    }
+
+
+def fetch_sheet() -> dict:
+    # This desktop environment exports a placeholder proxy at 127.0.0.1:9.
+    # Ignore inherited proxy variables so the server can reach the public CSV.
+    session = requests.Session()
+    session.trust_env = False
+    response = session.get(
+        SHEET_CSV_URL,
+        headers={"Cache-Control": "no-cache", "Pragma": "no-cache"},
+        timeout=25,
+    )
+    response.raise_for_status()
+    content_type = response.headers.get("Content-Type", "").lower()
+    if "csv" not in content_type and "text/plain" not in content_type:
+        raise ValueError(f"Expected CSV data, received {content_type or 'unknown content'}.")
+    return parse_sheet(response.text)
+
+
+class _TableReader(HTMLParser):
+    """Small standard-library HTML table reader for the published rate page."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.tables: list[list[list[str]]] = []
+        self.rows: list[list[str]] = []
+        self.row: list[str] = []
+        self.cell: list[str] = []
+        self.all_text: list[str] = []
+        self.in_table = False
+        self.in_row = False
+        self.in_cell = False
+
+    def handle_starttag(self, tag: str, attrs) -> None:
+        if tag == "table":
+            self.in_table = True
+            self.rows = []
+        elif self.in_table and tag == "tr":
+            self.in_row = True
+            self.row = []
+        elif self.in_table and self.in_row and tag in {"td", "th"}:
+            self.in_cell = True
+            self.cell = []
+
+    def handle_data(self, data: str) -> None:
+        cleaned = data.strip()
+        if cleaned:
+            self.all_text.append(cleaned)
+            if self.in_cell:
+                self.cell.append(cleaned)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.in_table and self.in_cell and tag in {"td", "th"}:
+            self.row.append(" ".join(self.cell).strip())
+            self.in_cell = False
+        elif self.in_table and self.in_row and tag == "tr":
+            if self.row:
+                self.rows.append(self.row)
+            self.in_row = False
+        elif tag == "table" and self.in_table:
+            self.tables.append(self.rows)
+            self.in_table = False
+
+
+def fetch_gold_rates() -> dict:
+    """Read the latest available Bahrain session rates from Gulf News."""
+    session = requests.Session()
+    session.trust_env = False
+    response = session.get(BAHRAIN_GOLD_URL, timeout=25)
+    response.raise_for_status()
+    parser = _TableReader()
+    parser.feed(response.text)
+
+    rates: dict[int, float] = {}
+    for table in parser.tables:
+        for row in table:
+            if not row:
+                continue
+            label = row[0].lower()
+            karat = 24 if "24 carat" in label else 22 if "22 carat" in label else None
+            if karat is None:
+                continue
+            # The first three values follow Morning, Afternoon, Evening; the last
+            # column is yesterday. Use the latest populated session for today.
+            session_rates = [cell_number(value) for value in row[1:4]]
+            available = [value for value in session_rates if value is not None]
+            if available:
+                rates[karat] = available[-1]
+
+    if 22 not in rates or 24 not in rates:
+        raise ValueError("Could not find today's 22K and 24K Bahrain rates.")
+
+    page_text = " ".join(parser.all_text)
+    date_match = re.search(r"(\d{1,2}(?:st|nd|rd|th)?\s+[A-Za-z]{3}\s+\d{4})\s+LIVE", page_text)
+    update_match = re.search(r"Updated\s+([\w ]+?\s+ago)", page_text, re.IGNORECASE)
+    return {
+        "22K": rates[22],
+        "24K": rates[24],
+        "rate_date": date_match.group(1) if date_match else "Latest published session",
+        "updated_text": update_match.group(1).strip() if update_match else "Latest published update",
+        "loaded_at": datetime.now().astimezone(),
+        "source_url": BAHRAIN_GOLD_URL,
+    }
+
+
+def gold_positions(rates: dict | None) -> list[dict]:
+    if not rates:
+        return []
+    positions = []
+    for name, holding in HOLDINGS.items():
+        rate = float(rates[f"{holding['karat']}K"])
+        value = rate * holding["grams"]
+        pnl = value - holding["cost"]
+        positions.append(
+            {
+                "Holding": name,
+                "Weight": holding["grams"],
+                "Rate": rate,
+                "Cost": holding["cost"],
+                "Value": value,
+                "P/L": pnl,
+                "P/L %": pnl / holding["cost"] * 100,
+            }
+        )
+    return positions
+
+
+def make_status_image(
+    *,
+    month: str,
+    total_collected: float,
+    month_collected: float,
+    paid_count: int,
+    member_count: int,
+    due_amount: float,
+    balance: float | None,
+    positions: list[dict],
+    pending_details: list[dict],
+) -> bytes:
+    """Create a high-contrast Khair-branded WhatsApp summary card."""
+    def font(size: int, bold: bool = False):
+        font_path = "C:/Windows/Fonts/arialbd.ttf" if bold else "C:/Windows/Fonts/arial.ttf"
+        try:
+            return ImageFont.truetype(font_path, size=size)
+        except OSError:
+            return ImageFont.load_default(size=size)
+
+    width = 1200
+    pending_rows = []
+    for detail in pending_details:
+        month_lines = textwrap.wrap(" · ".join(detail["months"]), width=94) or ["No month details"]
+        row_height = 66 + 25 * (len(month_lines) - 1)
+        pending_rows.append((detail, month_lines, row_height))
+    gold_count = len(positions) if positions else 1
+    pending_content_height = sum(row[2] + 10 for row in pending_rows)
+    height = max(1120, 950 + gold_count * 110 + pending_content_height)
+    image = Image.new("RGB", (width, height), "#0B1422")
+    draw = ImageDraw.Draw(image)
+
+    title_font = font(38, True)
+    section_font = font(25, True)
+    body_font = font(22, True)
+    small_font = font(19)
+    muted_font = font(17)
+    white = "#F4FBF8"
+    ink = "#142334"
+    muted = "#A9BBC0"
+    teal = "#19C6A0"
+    gold = "#E4BD68"
+    red = "#D54D65"
+    card = "#142337"
+    edge = "#2B4853"
+
+    # Branded hero strip
+    draw.rounded_rectangle((38, 36, width - 38, 224), radius=34, fill="#102A34", outline="#236258", width=2)
+    draw.rounded_rectangle((68, 74, 496, 187), radius=20, fill="#0D1B2B")
+    if LOGO_PATH.exists():
+        logo = Image.open(LOGO_PATH).convert("RGB")
+        logo.thumbnail((400, 98), Image.Resampling.LANCZOS)
+        image.paste(logo, (82, 82))
+    draw.text((548, 72), "KHAIR GROUP FUND", font=muted_font, fill="#A6C5C3")
+    draw.text((548, 105), month_label(month), font=title_font, fill=white)
+    draw.text((550, 166), "GROUP UPDATE  ·  CONTRIBUTIONS & INVESTMENTS", font=small_font, fill=gold)
+    draw.ellipse((width - 112, 70, width - 76, 106), fill=teal)
+    draw.ellipse((width - 101, 81, width - 87, 95), fill="#D9FFF4")
+
+    y = 252
+    cards = [
+        ("TOTAL COLLECTED", money(total_collected), teal),
+        ("THIS MONTH", money(month_collected), "#5DC7E8"),
+        ("OUTSTANDING", money(due_amount), "#F07C8D"),
+        ("FUND BALANCE", money(balance) if balance is not None else "Not listed", gold),
+    ]
+    for index, (label, value, accent) in enumerate(cards):
+        x = 44 + (index % 2) * 568
+        cy = y + (index // 2) * 138
+        draw.rounded_rectangle((x, cy, x + 544, cy + 116), radius=22, fill=card, outline=edge, width=2)
+        draw.rounded_rectangle((x + 19, cy + 24, x + 26, cy + 91), radius=4, fill=accent)
+        draw.text((x + 44, cy + 20), label, font=muted_font, fill=muted)
+        draw.text((x + 44, cy + 53), value, font=section_font, fill=white)
+
+    y += 302
+    draw.rounded_rectangle((44, y, width - 44, y + 116), radius=22, fill="#12343C", outline="#27685F", width=2)
+    draw.text((72, y + 20), "MONTHLY COLLECTION", font=muted_font, fill="#B3D3CE")
+    draw.text((72, y + 52), f"{paid_count} of {member_count} members paid", font=section_font, fill=white)
+    progress = paid_count / member_count if member_count else 0
+    bar_left, bar_top, bar_width, bar_height = 650, y + 48, 450, 22
+    draw.rounded_rectangle((bar_left, bar_top, bar_left + bar_width, bar_top + bar_height), radius=11, fill="#294650")
+    if progress:
+        draw.rounded_rectangle((bar_left, bar_top, bar_left + max(18, round(bar_width * progress)), bar_top + bar_height), radius=11, fill=teal)
+    draw.text((650, y + 78), f"{progress:.0%} complete", font=muted_font, fill="#C2D4D0")
+
+    y += 154
+    draw.text((52, y), "GOLD PORTFOLIO", font=section_font, fill=gold)
+    if positions and member_count:
+        group_gold_pnl = sum(float(position["P/L"]) for position in positions)
+        per_member_gold_pnl = group_gold_pnl / member_count
+        per_member_color = teal if per_member_gold_pnl >= 0 else "#FF8796"
+        draw.text(
+            (width - 54, y + 2),
+            f"EQUAL-SHARE P/L / MEMBER  {per_member_gold_pnl:+,.2f} BHD",
+            font=small_font,
+            fill=per_member_color,
+            anchor="ra",
+        )
+    draw.text((52, y + 34), "Current Bahrain rate estimate  ·  value compared with purchase cost", font=muted_font, fill=muted)
+    y += 68
+    if positions:
+        for position in positions:
+            pnl_color = teal if position["P/L"] >= 0 else "#FF8796"
+            draw.rounded_rectangle((44, y, width - 44, y + 96), radius=18, fill=card, outline="#69562F", width=2)
+            draw.text((70, y + 15), f"{position['Holding']}  ·  {position['Weight']:g} g", font=body_font, fill=white)
+            draw.text((70, y + 53), f"RATE {money(position['Rate'])}/g  ·  COST {money(position['Cost'])}  ·  VALUE {money(position['Value'])}", font=muted_font, fill="#C0CDD1")
+            pnl_text = f"{position['P/L']:+,.2f} BHD  ({position['P/L %']:+.2f}%)"
+            draw.text((width - 72, y + 31), pnl_text, font=body_font, fill=pnl_color, anchor="ra")
+            y += 110
+    else:
+        draw.rounded_rectangle((44, y, width - 44, y + 96), radius=18, fill=card, outline=edge, width=2)
+        draw.text((70, y + 34), "Live Bahrain gold rate unavailable", font=body_font, fill=muted)
+        y += 110
+
+    y += 18
+    if pending_rows:
+        section_top = y
+        list_height = 58 + sum(row[2] + 10 for row in pending_rows)
+        draw.rounded_rectangle((38, section_top, width - 38, section_top + list_height), radius=26, fill="#13283A", outline="#2F6157", width=2)
+        draw.text((68, y + 20), f"PENDING MEMBERS  ·  THROUGH {month_label(month).upper()}", font=section_font, fill="#DDF3E8")
+        draw.text((width - 68, y + 25), f"{len(pending_rows)} MEMBERS", font=small_font, fill="#E4BD68", anchor="ra")
+        y += 64
+        for detail, month_lines, row_height in pending_rows:
+            draw.rounded_rectangle((58, y, width - 58, y + row_height), radius=16, fill="#1A3042", outline="#2B4853", width=1)
+            draw.text((82, y + 10), detail["name"], font=body_font, fill=white)
+            amount_text = f"{detail['month_count']} MONTH(S)  ·  {money(detail['amount'])} DUE"
+            draw.text((width - 82, y + 13), amount_text, font=small_font, fill="#FF9EAB", anchor="ra")
+            for line_index, line in enumerate(month_lines):
+                draw.text((82, y + 40 + line_index * 24), line, font=muted_font, fill="#B5C5CB")
+            y += row_height + 10
+    else:
+        draw.rounded_rectangle((44, y, width - 44, y + 88), radius=18, fill="#12343C", outline="#27685F", width=2)
+        draw.text((72, y + 29), "ALL CONTRIBUTIONS ARE UP TO DATE", font=body_font, fill=teal)
+
+    footer = f"KHAIR GROUP FUND  ·  Rates: Gulf News Bahrain  ·  Generated {datetime.now().astimezone().strftime('%d %b %Y, %H:%M')}"
+    draw.text((54, height - 48), footer, font=muted_font, fill="#8EA3AA")
+    output = io.BytesIO()
+    image.save(output, format="PNG", optimize=True)
+    return output.getvalue()
+
+
+def make_inline_email_draft(
+    *, recipients: list[str], subject: str, body: str, image_bytes: bytes
+) -> bytes:
+    """Build a reviewable .eml draft with the Khair summary embedded inline."""
+    message = EmailMessage()
+    message["Bcc"] = ", ".join(recipients)
+    message["Subject"] = subject
+    message.set_content(body)
+    html_body = (
+        '<html><body style="margin:0;background:#f3f0e7;padding:24px;'
+        'font-family:Arial,sans-serif;color:#253936">'
+        '<div style="max-width:760px;margin:auto">'
+        f'<p style="font-size:16px;line-height:1.6;white-space:pre-line">{escape(body)}</p>'
+        '<p style="font-weight:bold;color:#1c6556">Khair group fund update</p>'
+        '<img src="cid:khair-summary" alt="Khair group fund summary" '
+        'style="display:block;width:100%;max-width:720px;height:auto;border-radius:16px">'
+        '</div></body></html>'
+    )
+    message.add_alternative(html_body, subtype="html")
+    html_part = message.get_payload()[-1]
+    html_part.add_related(
+        image_bytes,
+        maintype="image",
+        subtype="png",
+        cid="<khair-summary>",
+        filename="khair-group-update.png",
+        disposition="inline",
+    )
+    return message.as_bytes()
+
+
+def normalize_phone(value: str) -> str | None:
+    digits = re.sub(r"\D", "", value)
+    if digits.startswith("00"):
+        digits = digits[2:]
+    if len(digits) == 8:
+        return "973" + digits
+    if 10 <= len(digits) <= 15:
+        return digits
+    return None
+
+
+def money(value: float) -> str:
+    return f"BHD {value:,.2f}"
+
+
+def month_label(value: str) -> str:
+    return datetime.strptime(value, "%b-%y").strftime("%b %Y")
+
+
+def load_if_needed(force: bool = False) -> None:
+    if "khair_data" not in st.session_state or force:
+        with st.spinner("Refreshing the latest figures…"):
+            try:
+                st.session_state.khair_data = fetch_sheet()
+                st.session_state.khair_error = None
+            except Exception as exc:  # Retain the last good snapshot if refresh fails.
+                st.session_state.khair_error = str(exc)
+            try:
+                st.session_state.gold_rates = fetch_gold_rates()
+                st.session_state.gold_error = None
+            except Exception as exc:
+                st.session_state.gold_error = str(exc)
+
+
+if LOGO_PATH.exists():
+    with Image.open(LOGO_PATH) as source_logo:
+        logo_mark = source_logo.convert("RGB").crop((20, 12, 92, 82))
+        logo_buffer = io.BytesIO()
+        logo_mark.save(logo_buffer, format="PNG")
+    logo_data = base64.b64encode(logo_buffer.getvalue()).decode("ascii")
+else:
+    logo_data = ""
+with st.container(horizontal=True, horizontal_alignment="right", wrap=True):
+    theme_choice = st.segmented_control(
+        "Theme preview",
+        ["Khair Emerald", "Linen & Olive preview"],
+        default="Linen & Olive preview",
+        selection_mode="single",
+        label_visibility="collapsed",
+        key="khair_theme_choice",
+    )
+
+is_linen = theme_choice == "Linen & Olive preview"
+theme_class = "khair-hero linen-olive" if is_linen else "khair-hero"
+nav_active_bg = "#E8EFE5" if is_linen else "#E1F4ED"
+nav_active_color = "#496F58" if is_linen else "#0F766E"
+if is_linen:
+    st.html(
+        """
+        <style>
+          [data-testid="stAppViewContainer"] { background:#F5F2E9; }
+          [data-testid="stHeader"] { background:transparent; }
+          [data-testid="stVerticalBlockBorderWrapper"] { background:#FBFAF6; border-color:#E3DECF; }
+          [data-testid="stMetric"] { background:#FBFAF6; border-color:#E3DECF; }
+          [data-testid="stTabs"] button[aria-selected="true"] { color:#496F58; border-bottom-color:#6B8A68; }
+          [data-testid="stBaseButton-primary"] { background:#496F58; border-color:#496F58; }
+          [data-testid="stProgressBar"] > div > div { background:#789673; }
+          .khair-motion { background:#E6E2D4 !important; }
+          .khair-motion::after { background:linear-gradient(90deg,#47735B,#8FA47B,#C5A76A) !important; }
+          .khair-hero.linen-olive { color:#293D34; background:linear-gradient(105deg,#FCFBF6 0%,#F0EEE3 68%,#E8EDDF 100%);
+            border:1px solid #E1DDCE; border-radius:16px; box-shadow:0 10px 28px #263b2d0d; }
+          .khair-hero.linen-olive .khair-brand { color:#293D34; font-family:Georgia,serif; letter-spacing:0; }
+          .khair-hero.linen-olive .khair-brand span { color:#66866B !important; }
+          .khair-hero.linen-olive .khair-subtitle { color:#748075; }
+        </style>
+        """
+    )
+
+st.html(
+    f"""
+    <style>
+      [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {{ display: none !important; }}
+      section.main > div {{ padding-top: 1.3rem; }}
+      .khair-hero {{ display:flex; align-items:center; gap:16px; padding:17px 22px; margin-bottom:12px;
+        border-radius:24px; color:#effcf8; background:radial-gradient(ellipse at 5% 5%,#136e62 0%,transparent 48%),
+        linear-gradient(115deg,#101a2d 0%,#17283b 58%,#123d39 100%); box-shadow:0 16px 40px #102c281f; }}
+      .khair-logo-frame {{ width:64px; height:64px; flex:0 0 64px; display:grid; place-items:center;
+        border-radius:17px; background:transparent; }}
+      .khair-logo-frame img {{ width:62px; height:62px; object-fit:contain; border-radius:15px; }}
+      .khair-brand {{ font:700 29px/1.1 sans-serif; letter-spacing:-.7px; }}
+      .khair-subtitle {{ margin-top:7px; color:#b9cbc9; font:500 14px/1.45 sans-serif; }}
+      [data-testid="stTabs"] [role="tablist"] {{ display:flex; gap:10px; border-bottom:0; flex-wrap:wrap; }}
+      [data-testid="stTabs"] button[role="tab"] {{ min-height:48px; padding:10px 18px; border:1px solid #DCE6E2;
+        border-radius:13px; background:#FFFFFF; font-weight:650; transition:background .18s ease,box-shadow .18s ease; }}
+      [data-testid="stTabs"] button[role="tab"]:hover {{ border-color:#8EB8A5; background:#F5FAF7; }}
+      [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{ color:{nav_active_color}; background:{nav_active_bg};
+        border-color:#8AB8A2; box-shadow:0 3px 12px #224b3510; }}
+      [data-testid="stTabs"] [role="tabpanel"] {{ padding-top:1rem; }}
+      @media(max-width:620px) {{ .khair-hero {{ padding:14px 16px; gap:12px; }} .khair-logo-frame {{ width:54px;height:54px;flex-basis:54px; }}
+        .khair-logo-frame img {{ width:52px;height:52px; }} .khair-brand {{ font-size:25px; }} }}
+    </style>
+    <header class="{theme_class}" aria-label="Khair group fund dashboard">
+      <div class="khair-logo-frame">{'<img alt="Khair logo" src="data:image/png;base64,' + logo_data + '">' if logo_data else '<span style="font-size:34px;font-weight:bold">خ</span>'}</div>
+      <div><div class="khair-brand">Khair <span style="color:#55dfbd">·</span> Group Fund</div>
+        <div class="khair-subtitle">Contributions, member activity &amp; investment overview</div>
+        </div>
+    </header>
+    """
+)
+
+with st.container(
+    horizontal=True,
+    horizontal_alignment="distribute",
+    vertical_alignment="center",
+    wrap=True,
+):
+    st.caption("Live overview · Khair members and fund")
+    refresh_clicked = st.button("Refresh data", icon=":material/refresh:", type="primary")
+
+st.html(
+    """
+    <style>
+    @keyframes khair-sweep { from { transform: translateX(-115%); } to { transform: translateX(430%); } }
+    .khair-motion { height: 4px; width: 100%; overflow: hidden; border-radius: 8px; background: #dcebe6; }
+    .khair-motion::after { content: ""; display: block; height: 100%; width: 24%; border-radius: inherit;
+      background: linear-gradient(90deg, #0f766e, #41daab, #f0d78a); animation: khair-sweep 8s ease-in-out infinite; }
+    @media (prefers-reduced-motion: reduce) { .khair-motion::after { animation: none; width: 100%; opacity: .55; } }
+    </style>
+    <div class="khair-motion" aria-hidden="true"></div>
+    """
+)
+
+load_if_needed(force=refresh_clicked)
+data = st.session_state.get("khair_data")
+error = st.session_state.get("khair_error")
+gold_rates = st.session_state.get("gold_rates")
+gold_error = st.session_state.get("gold_error")
+
+if data is None:
+    st.error("Could not load the published Google Sheet.")
+    st.code(error or "No data returned.")
+    st.link_button("Open published CSV", SHEET_CSV_URL, icon=":material/open_in_new:")
+    st.stop()
+
+if error:
+    st.warning(f"Refresh failed; showing the last successful snapshot. {error}")
+
+members: pd.DataFrame = data["members"]
+months: list[str] = data["months"]
+monthly: pd.DataFrame = data["monthly"]
+ledger: dict[str, float] = data["ledger"]
+fee: float = data["monthly_fee"]
+
+latest_month = months[-1]
+with st.container(border=True):
+    filter_col, threshold_col, note_col = st.columns([1, 1.25, 1.4], vertical_alignment="bottom")
+    with filter_col:
+        selected_month = st.selectbox(
+            "Contribution month",
+            months,
+            index=months.index(latest_month),
+            format_func=month_label,
+        )
+    with threshold_col:
+        group_limit = st.number_input(
+            "Pending follow-up threshold (months)",
+            min_value=1,
+            max_value=max(1, len(months)),
+            value=min(3, max(1, len(months))),
+        )
+    with note_col:
+        st.caption("Read-only connection · edit contributions in the source sheet")
+
+paid_this_month = int((members[selected_month] > 0).sum())
+member_count = len(members)
+due_this_month = member_count - paid_this_month
+due_amount = due_this_month * fee
+paid_total = sum(float(members[month].sum()) for month in months)
+balance = ledger.get("balance")
+collected_ledger = ledger.get("total collection", paid_total)
+completion = paid_this_month / member_count if member_count else 0
+month_position = months.index(selected_month)
+months_to_date = months[: month_position + 1]
+unpaid_counts = members[months_to_date].le(0).sum(axis=1)
+follow_up_count = int((unpaid_counts > group_limit).sum())
+selected_collection = float(
+    monthly.loc[monthly["Month"] == selected_month, "Collected (BHD)"].iloc[0]
+)
+positions = gold_positions(gold_rates)
+gold_total_cost = sum(item["Cost"] for item in positions)
+gold_total_value = sum(item["Value"] for item in positions)
+gold_total_pnl = sum(item["P/L"] for item in positions)
+
+st.caption("Group fund overview")
+st.caption(
+    f"Connected to Google Sheets · refreshed "
+    f"{data['loaded_at'].strftime('%d %b %Y at %H:%M')}"
+)
+
+with st.container(horizontal=True):
+    st.metric("Total collected", money(collected_ledger), border=True)
+    st.metric(
+        f"Collected · {month_label(selected_month)}",
+        money(selected_collection),
+        f"{paid_this_month} of {member_count} members",
+        border=True,
+    )
+    st.metric("Outstanding", money(due_amount), f"{due_this_month} members", border=True)
+    st.metric("Fund balance", money(balance) if balance is not None else "Not listed", border=True)
+
+st.caption("Choose a section to see its details")
+overview_tab, members_tab, ledger_tab, whatsapp_tab = st.tabs(
+    ["📊 Overview", "👥 Members", "📒 Fund ledger", "✉️ Share & reminders"]
+)
+
+with overview_tab:
+    st.subheader("Gold portfolio")
+    if positions:
+        rate_col, pnl_col = st.columns([1.7, 1], gap="medium")
+        with rate_col:
+            st.caption(
+                f"Bahrain reference rate · {gold_rates['rate_date']} · "
+                f"updated {gold_rates['updated_text']}"
+            )
+        with pnl_col:
+            st.link_button(
+                "Rate source · Gulf News",
+                BAHRAIN_GOLD_URL,
+                icon=":material/open_in_new:",
+            )
+        gold_cols = st.columns(2, gap="medium")
+        for column, position in zip(gold_cols, positions):
+            with column.container(border=True):
+                st.metric(
+                    f"{position['Holding']} · {position['Weight']:g} g",
+                    money(position["Value"]),
+                    f"{position['P/L']:+,.2f} BHD · {position['P/L %']:+.2f}%",
+                    delta_color="normal",
+                )
+                cost_per_gram = position["Cost"] / position["Weight"]
+                st.caption(
+                    f"Rate: {money(position['Rate'])}/g · buy basis: "
+                    f"{money(cost_per_gram)}/g · cost: {money(position['Cost'])}"
+                )
+        with st.container(horizontal=True, wrap=True):
+            st.metric("Combined gold value", money(gold_total_value), border=True)
+            st.metric(
+                "Combined gold P/L",
+                f"BHD {gold_total_pnl:+,.2f}",
+                delta=f"{gold_total_pnl / gold_total_cost:+.2%}" if gold_total_cost else None,
+                border=True,
+            )
+            st.metric(
+                "Gold P/L per member · equal share",
+                f"BHD {gold_total_pnl / member_count:+,.2f}" if member_count else "Not available",
+                delta=f"Across {member_count} members" if member_count else None,
+                delta_color="off",
+                border=True,
+            )
+        st.caption(
+            f"Equal-share estimate divides the combined P/L by {member_count} members. "
+            "Reference-rate estimate; shop buyback prices, spreads, and workmanship can differ."
+        )
+    elif gold_error:
+        st.warning(f"Live Bahrain rates are unavailable right now. {gold_error}")
+    else:
+        st.info("Live Bahrain gold rates are loading.")
+
+    trend_col, status_col = st.columns([1.6, 1], gap="large")
+    with trend_col:
+        with st.container(border=True):
+            st.subheader("Collection trend")
+            chart_data = monthly.copy()
+            chart_data["Month label"] = chart_data["Month"].map(month_label)
+            if is_linen:
+                wave_colors = ("#DEE8D6", "#A8BE9B", "#496F58", "#B69B64")
+            else:
+                wave_colors = ("#BCEBDD", "#48C99F", "#0F766E", "#D8B45C")
+            base = alt.Chart(chart_data).encode(
+                x=alt.X("Month label:N", title=None, sort=chart_data["Month label"].tolist(), axis=alt.Axis(labelAngle=0)),
+                tooltip=[
+                    alt.Tooltip("Month label:N", title="Month"),
+                    alt.Tooltip("Collected (BHD):Q", title="Collected", format=",.2f"),
+                    alt.Tooltip("Expected (BHD):Q", title="Target", format=",.2f"),
+                    alt.Tooltip("Paid members:Q", title="Members paid"),
+                ],
+            )
+            target_rule = alt.Chart(
+                pd.DataFrame({"Expected target": [float(chart_data["Expected (BHD)"].max())]})
+            ).mark_rule(color=wave_colors[3], strokeDash=[5, 4], strokeWidth=2).encode(
+                y=alt.Y("Expected target:Q", title="BHD", scale=alt.Scale(zero=True))
+            )
+            wave_fill = base.mark_area(
+                interpolate="monotone",
+                opacity=0.8,
+                color=alt.Gradient(
+                    gradient="linear",
+                    stops=[
+                        alt.GradientStop(color=wave_colors[0], offset=0),
+                        alt.GradientStop(color=wave_colors[1], offset=0.65),
+                        alt.GradientStop(color=wave_colors[2], offset=1),
+                    ],
+                    x1=0, x2=0, y1=0, y2=1,
+                ),
+            ).encode(y=alt.Y("Collected (BHD):Q", title="BHD", scale=alt.Scale(zero=True)))
+            wave_line = base.mark_line(
+                interpolate="monotone", color=wave_colors[2], strokeWidth=3, point=True
+            ).encode(y=alt.Y("Collected (BHD):Q", title="BHD", scale=alt.Scale(zero=True)))
+            collection_chart = (wave_fill + wave_line + target_rule).properties(height=300).configure_view(stroke=None).configure_axis(
+                gridColor="#e8eeec", labelColor="#718078", titleColor="#718078"
+            )
+            st.altair_chart(
+                collection_chart,
+                width="stretch",
+                theme="streamlit",
+                key="collection_trend_chart",
+            )
+            st.caption("Wave: contributions collected · dashed accent line: monthly target")
+            st.caption(f"Monthly contribution target: {money(fee)} per member")
+
+    with status_col:
+        with st.container(border=True):
+            st.subheader(f"{month_label(selected_month)} progress")
+            st.progress(completion, text=f"{completion:.0%} collected · {paid_this_month}/{member_count}")
+            st.metric("Still due", money(due_amount), f"{due_this_month} members")
+            st.caption(f"{follow_up_count} members have more than {group_limit} unpaid months through {month_label(selected_month)}.")
+
+    with st.container(border=True):
+        st.subheader("Most pending members")
+        most_pending = members[["Name", "Paid months", "Monthly contributions"]].copy()
+        most_pending["Unpaid months"] = unpaid_counts.values
+        most_pending["Amount outstanding (BHD)"] = most_pending["Unpaid months"] * fee
+        most_pending = most_pending[most_pending["Unpaid months"] > 0]
+        most_pending = most_pending.sort_values(
+            ["Unpaid months", "Name"], ascending=[False, True]
+        ).head(8)
+        if most_pending.empty:
+            st.success("Everyone is paid through the selected month.")
+        else:
+            st.dataframe(
+                most_pending,
+                hide_index=True,
+                column_config={
+                    "Monthly contributions": st.column_config.NumberColumn("Contributed (BHD)", format="%.2f"),
+                    "Amount outstanding (BHD)": st.column_config.NumberColumn(format="%.2f"),
+                },
+                alt="The eight members with the most unpaid months through the selected month",
+            )
+
+with members_tab:
+    st.subheader("Member payments")
+    search_col, month_col, status_col = st.columns([1.25, 1, 1], gap="medium")
+    with search_col:
+        search = st.text_input(
+            "Find a member",
+            placeholder="Search by name…",
+            icon=":material/search:",
+        )
+    with month_col:
+        member_month = st.selectbox(
+            "Member payment month",
+            months,
+            index=months.index(selected_month),
+            format_func=month_label,
+            key="member_payment_month_filter",
+            help="This filter applies to the member list only. The top month filter still controls the overview.",
+        )
+    with status_col:
+        payment_filter = st.segmented_control(
+            "Payment status",
+            ["Everyone", "Pending", "Paid"],
+            default="Everyone",
+            selection_mode="single",
+        )
+
+    member_months_to_date = months[: months.index(member_month) + 1]
+    member_unpaid_counts = members[member_months_to_date].le(0).sum(axis=1)
+    view = members[["Name", "Registration fee", "Paid months", "Monthly contributions"]].copy()
+    view["Unpaid through selected month"] = member_unpaid_counts.values
+    view[month_label(member_month)] = members[member_month].map(
+        lambda amount: "Paid" if amount > 0 else "Pending"
+    )
+    if search.strip():
+        view = view[view["Name"].str.contains(search.strip(), case=False, na=False)]
+    if payment_filter == "Pending":
+        view = view[view[month_label(member_month)] == "Pending"]
+    elif payment_filter == "Paid":
+        view = view[view[month_label(member_month)] == "Paid"]
+    view = view.sort_values("Unpaid through selected month", ascending=False)
+
+    st.dataframe(
+        view,
+        hide_index=True,
+        height=440,
+        column_config={
+            "Monthly contributions": st.column_config.NumberColumn("Contributed (BHD)", format="%.2f"),
+            "Registration fee": st.column_config.NumberColumn("Registration fee (BHD)", format="%.2f"),
+        },
+        alt="Member payment status and contribution totals",
+    )
+    st.download_button(
+        "Download member list",
+        data=view.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"khair-members-{member_month.lower()}.csv",
+        mime="text/csv",
+        icon=":material/download:",
+    )
+
+    with st.expander("View full month-by-month history"):
+        matrix = members[["Name", *months]].copy()
+        for month in months:
+            matrix[month] = matrix[month].map(lambda amount: "✓" if amount > 0 else "—")
+        st.dataframe(matrix, hide_index=True, alt="Full member payment history by month")
+
+with ledger_tab:
+    st.subheader("Fund ledger")
+    st.caption("Values below are read from the ledger rows in the source sheet.")
+    ledger_items = [
+        ("Balance", "balance"),
+        ("Total collection", "total collection"),
+        ("Registration fees", "reg. fee"),
+        ("Meeting expenses", "meeting exp."),
+        ("Gold", "gold"),
+        ("Kuri", "kuri"),
+        ("Rounding", "rounding"),
+    ]
+    for start in range(0, len(ledger_items), 4):
+        with st.container(horizontal=True):
+            for label, key in ledger_items[start : start + 4]:
+                value = ledger.get(key)
+                st.metric(label, money(value) if value is not None else "Not listed", border=True)
+
+    st.subheader("Monthly totals")
+    monthly_view = monthly.assign(Month=monthly["Month"].map(month_label))
+    st.dataframe(
+        monthly_view,
+        hide_index=True,
+        column_config={
+            "Collected (BHD)": st.column_config.NumberColumn(format="%.2f"),
+            "Expected (BHD)": st.column_config.NumberColumn(format="%.2f"),
+        },
+        alt="Monthly contribution totals and expected target",
+    )
+
+with whatsapp_tab:
+    st.subheader("Share a group update")
+    st.caption(
+        "Choose text to open a pre-filled WhatsApp draft, or download a status image "
+        "and attach it to your group. The dashboard never sends a message automatically."
+    )
+    share_format = st.segmented_control(
+        "Share format",
+        ["Text", "Image"],
+        default="Text",
+        selection_mode="single",
+    )
+    share_col, share_options = st.columns([1.45, 1], gap="large")
+    with share_options:
+        include_gold = st.checkbox("Include gold profit / loss", value=True)
+        include_pending_names = st.checkbox("Include pending names and months", value=True)
+
+    pending_through_month = members.loc[unpaid_counts > 0]
+    pending_names = pending_through_month["Name"].tolist()
+    pending_details = []
+    for _, pending_member in pending_through_month.iterrows():
+        unpaid_labels = [
+            month_label(month)
+            for month in months_to_date
+            if float(pending_member[month]) <= 0
+        ]
+        pending_details.append(
+            {
+                "name": pending_member["Name"],
+                "month_count": len(unpaid_labels),
+                "months": unpaid_labels,
+                "amount": len(unpaid_labels) * fee,
+            }
+        )
+    pending_details.sort(key=lambda item: (-item["month_count"], item["name"].lower()))
+    summary_lines = [
+        f"*Khair group update · {month_label(selected_month)}*",
+        f"Total contributions: {money(collected_ledger)}",
+        f"This month: {paid_this_month}/{member_count} members paid ({money(selected_collection)})",
+        f"Outstanding this month: {due_this_month} members · {money(due_amount)}",
+        f"Fund balance: {money(balance) if balance is not None else 'Not listed'}",
+    ]
+    if include_gold:
+        if positions:
+            summary_lines.append(
+                f"Gold P/L estimate: {money(gold_total_pnl)} "
+                f"(value {money(gold_total_value)} · cost {money(gold_total_cost)})"
+            )
+            if member_count:
+                summary_lines.append(
+                    f"Equal-share gold P/L estimate per member: "
+                    f"BHD {gold_total_pnl / member_count:+,.2f}"
+                )
+            for position in positions:
+                summary_lines.append(
+                    f"{position['Holding']}: {position['Weight']:g} g · "
+                    f"{money(position['P/L'])} P/L"
+                )
+        else:
+            summary_lines.append("Gold P/L: live rate unavailable")
+    if include_pending_names and pending_names:
+        listed = pending_names[:20]
+        suffix = f" (+{len(pending_names) - 20} more)" if len(pending_names) > 20 else ""
+        summary_lines.append("Pending through this month: " + ", ".join(listed) + suffix)
+    summary_text = "\n".join(summary_lines)
+
+    with share_col:
+        if share_format == "Text":
+            message = st.text_area(
+                "Message preview · edit before opening WhatsApp",
+                value=summary_text,
+                height=240,
+                key=f"summary_message_{selected_month}_{include_gold}_{include_pending_names}",
+            )
+            st.link_button(
+                "Open WhatsApp draft",
+                f"https://wa.me/?text={quote(message)}",
+                icon=":material/chat:",
+                type="primary",
+            )
+        else:
+            image_bytes = make_status_image(
+                month=selected_month,
+                total_collected=collected_ledger,
+                month_collected=selected_collection,
+                paid_count=paid_this_month,
+                member_count=member_count,
+                due_amount=due_amount,
+                balance=balance,
+                positions=positions if include_gold else [],
+                pending_details=pending_details if include_pending_names else [],
+            )
+            st.image(image_bytes, alt="Khair group update card for WhatsApp sharing")
+            st.download_button(
+                "Download status image",
+                data=image_bytes,
+                file_name=f"khair-update-{selected_month.lower()}.png",
+                mime="image/png",
+                icon=":material/download:",
+                type="primary",
+            )
+            st.caption("After downloading, attach the PNG in your WhatsApp group.")
+
+    st.subheader("Personal payment reminder")
+    if pending_names:
+        reminder_member = st.selectbox(
+            "Choose a member with an outstanding contribution",
+            pending_names,
+            key=f"reminder_member_{selected_month}",
+        )
+        member_record = members.loc[members["Name"] == reminder_member].iloc[0]
+        if not data["has_phone_column"]:
+            st.info(
+                "To fill this number automatically, add a `Phone` column beside the member names "
+                "in the Khair tab, enter each member’s WhatsApp number, then publish the updated tab."
+            )
+        unpaid_month_labels = [
+            month_label(month)
+            for month in months_to_date
+            if float(member_record[month]) <= 0
+        ]
+        reminder_due = len(unpaid_month_labels) * fee
+        default_reminder = (
+            f"Assalamu alaikum {reminder_member}, a gentle reminder from Khair about "
+            f"your contribution for {', '.join(unpaid_month_labels)} "
+            f"({len(unpaid_month_labels)} month(s), {money(reminder_due)}). "
+            "Kindly pay when convenient. Jazakallah khair."
+        )
+        reminder_phone = st.text_input(
+            "WhatsApp number",
+            placeholder="Bahrain 8-digit number or full country-code number",
+            value=str(member_record.get("Phone", "") or ""),
+            key=f"reminder_phone_{selected_month}_{reminder_member}",
+        )
+        reminder_message = st.text_area(
+            "Reminder message · edit before opening WhatsApp",
+            value=default_reminder,
+            height=140,
+            key=f"reminder_text_{selected_month}_{reminder_member}",
+        )
+        normalized_phone = normalize_phone(reminder_phone)
+        if normalized_phone:
+            st.link_button(
+                f"Open WhatsApp reminder for {reminder_member}",
+                f"https://wa.me/{normalized_phone}?text={quote(reminder_message)}",
+                icon=":material/chat:",
+                type="primary",
+            )
+        else:
+            st.caption("Enter a valid number to prepare the WhatsApp draft. Bahrain 8-digit numbers get +973 automatically.")
+    else:
+        st.success(f"Everyone is paid through {month_label(selected_month)}.")
+
+    st.subheader("One-shot email reminder")
+    st.caption(
+        "Prepare one BCC email for pending members with addresses in the sheet. "
+        "It opens in your email app for review; the dashboard does not send it."
+    )
+    if not data["has_email_column"]:
+        st.info(
+            "Add an `Email` column to the Khair tab, fill in member addresses, and republish the tab "
+            "as CSV to enable automatic recipient selection."
+        )
+        st.button(
+            "Send email",
+            icon=":material/mail:",
+            disabled=True,
+            help="Recipient addresses are not available in the published sheet yet.",
+        )
+    else:
+        email_pending = pending_through_month.copy()
+        email_pending["Email"] = email_pending["Email"].fillna("").astype(str).str.strip()
+        email_pending = email_pending[
+            email_pending["Email"].str.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", na=False)
+        ]
+        recipient_options = {
+            f"{row['Name']} · {row['Email']}": row["Email"]
+            for _, row in email_pending.iterrows()
+        }
+        if not recipient_options:
+            st.caption("No pending members have a valid email address in the published sheet.")
+            st.button(
+                "Send email",
+                icon=":material/mail:",
+                disabled=True,
+                help="Add valid email addresses for pending members in the published sheet.",
+            )
+        else:
+            selected_recipients = st.multiselect(
+                "Pending members to remind",
+                options=list(recipient_options),
+                default=list(recipient_options),
+                key=f"email_recipients_{selected_month}",
+            )
+            email_subject = st.text_input(
+                "Email subject",
+                value=f"Khair contribution reminder · {month_label(selected_month)}",
+                key=f"email_subject_{selected_month}",
+            )
+            email_body = st.text_area(
+                "Email message · review before sending",
+                value=(
+                    "Assalamu alaikum,\n\n"
+                    f"This is a gentle reminder that our records show one or more monthly contributions "
+                    f"outstanding through {month_label(selected_month)}. Please check your individual "
+                    "payment record and arrange any pending contribution when convenient.\n\n"
+                    "If you have already paid, please disregard this note and share the payment details "
+                    "so we can update the record.\n\nJazakallah khair,\nKhair Group Fund"
+                ),
+                height=170,
+                key=f"email_body_{selected_month}",
+            )
+            if selected_recipients:
+                email_image = make_status_image(
+                    month=selected_month,
+                    total_collected=collected_ledger,
+                    month_collected=selected_collection,
+                    paid_count=paid_this_month,
+                    member_count=member_count,
+                    due_amount=due_amount,
+                    balance=balance,
+                    positions=positions if include_gold else [],
+                    pending_details=pending_details if include_pending_names else [],
+                )
+                email_recipients = [recipient_options[label] for label in selected_recipients]
+                email_draft = make_inline_email_draft(
+                    recipients=email_recipients,
+                    subject=email_subject,
+                    body=email_body,
+                    image_bytes=email_image,
+                )
+                st.download_button(
+                    f"Download email draft · {len(selected_recipients)} member(s)",
+                    data=email_draft,
+                    file_name=f"khair-reminder-{selected_month.lower()}.eml",
+                    mime="message/rfc822",
+                    icon=":material/mail:",
+                    type="primary",
+                )
+                email_bcc = ",".join(email_recipients)
+                mailto_url = (
+                    f"mailto:?bcc={quote(email_bcc)}&subject={quote(email_subject)}"
+                    f"&body={quote(email_body)}"
+                )
+                st.link_button(
+                    "Send email · open composer",
+                    mailto_url,
+                    icon=":material/send:",
+                )
+                st.caption(
+                    "The .eml draft contains the summary image inline. The composer button fills a text-only "
+                    "email; review it and press Send in your mail app."
+                )
+                with st.expander("Preview image included in the email"):
+                    st.image(email_image, alt="Summary image embedded in the email reminder")
+            else:
+                st.caption("Select at least one member to prepare the email draft.")
+
+st.caption("Khair · Group fund dashboard · Read-only connection")

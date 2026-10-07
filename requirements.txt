@@ -1,0 +1,5 @@
+streamlit>=1.57
+pandas>=2.2
+altair>=5.0
+requests>=2.31
+Pillow>=10.0
