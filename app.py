@@ -330,6 +330,7 @@ def make_status_image(
     balance: float | None,
     positions: list[dict],
     pending_details: list[dict],
+    appearance: str = "dark",
 ) -> bytes:
     """Create a high-contrast Khair-branded WhatsApp summary card."""
     def font(size: int, bold: bool = False):
@@ -348,7 +349,31 @@ def make_status_image(
     gold_count = len(positions) if positions else 1
     pending_content_height = sum(row[2] + 10 for row in pending_rows)
     height = max(1120, 950 + gold_count * 110 + pending_content_height)
-    image = Image.new("RGB", (width, height), "#0B1422")
+    palette = {
+        "dark": {
+            "background": "#0B1422", "hero": "#102A34", "logo_back": "#0D1B2B",
+            "hero_outline": "#236258", "hero_muted": "#A6C5C3", "white": "#F4FBF8",
+            "muted": "#A9BBC0", "card": "#142337", "edge": "#2B4853",
+            "progress_card": "#12343C", "progress_outline": "#27685F",
+            "progress_muted": "#B3D3CE", "progress_track": "#294650",
+            "progress_text": "#C2D4D0", "gold_outline": "#69562F",
+            "pending_card": "#13283A", "pending_outline": "#2F6157",
+            "pending_row": "#1A3042", "pending_text": "#B5C5CB", "footer": "#8EA3AA",
+            "up_to_date": "#12343C",
+        },
+        "light": {
+            "background": "#F3F8F5", "hero": "#E1F1E9", "logo_back": "#102A34",
+            "hero_outline": "#9CCDB8", "hero_muted": "#47736A", "white": "#17352E",
+            "muted": "#5E756E", "card": "#FFFFFF", "edge": "#C7DDD2",
+            "progress_card": "#E2F3EB", "progress_outline": "#A8D3BE",
+            "progress_muted": "#416B60", "progress_track": "#C8E0D4",
+            "progress_text": "#416B60", "gold_outline": "#D9C58F",
+            "pending_card": "#E7F2EC", "pending_outline": "#A9CDBB",
+            "pending_row": "#FFFFFF", "pending_text": "#536D64", "footer": "#71857E",
+            "up_to_date": "#E2F3EB",
+        },
+    }[appearance]
+    image = Image.new("RGB", (width, height), palette["background"])
     draw = ImageDraw.Draw(image)
 
     title_font = font(38, True)
@@ -356,23 +381,22 @@ def make_status_image(
     body_font = font(22, True)
     small_font = font(19)
     muted_font = font(17)
-    white = "#F4FBF8"
-    ink = "#142334"
-    muted = "#A9BBC0"
-    teal = "#19C6A0"
-    gold = "#E4BD68"
-    red = "#D54D65"
-    card = "#142337"
-    edge = "#2B4853"
+    white = palette["white"]
+    muted = palette["muted"]
+    teal = "#0F766E" if appearance == "light" else "#19C6A0"
+    gold = "#987126" if appearance == "light" else "#E4BD68"
+    red = "#B83E51" if appearance == "light" else "#D54D65"
+    card = palette["card"]
+    edge = palette["edge"]
 
     # Branded hero strip
-    draw.rounded_rectangle((38, 36, width - 38, 224), radius=34, fill="#102A34", outline="#236258", width=2)
-    draw.rounded_rectangle((68, 74, 496, 187), radius=20, fill="#0D1B2B")
+    draw.rounded_rectangle((38, 36, width - 38, 224), radius=34, fill=palette["hero"], outline=palette["hero_outline"], width=2)
+    draw.rounded_rectangle((68, 74, 496, 187), radius=20, fill=palette["logo_back"])
     if LOGO_PATH.exists():
         logo = Image.open(LOGO_PATH).convert("RGB")
         logo.thumbnail((400, 98), Image.Resampling.LANCZOS)
         image.paste(logo, (82, 82))
-    draw.text((548, 72), "KHAIR GROUP FUND", font=muted_font, fill="#A6C5C3")
+    draw.text((548, 72), "KHAIR GROUP FUND", font=muted_font, fill=palette["hero_muted"])
     draw.text((548, 105), month_label(month), font=title_font, fill=white)
     draw.text((550, 166), "GROUP UPDATE  ·  CONTRIBUTIONS & INVESTMENTS", font=small_font, fill=gold)
     draw.ellipse((width - 112, 70, width - 76, 106), fill=teal)
@@ -394,22 +418,22 @@ def make_status_image(
         draw.text((x + 44, cy + 53), value, font=section_font, fill=white)
 
     y += 302
-    draw.rounded_rectangle((44, y, width - 44, y + 116), radius=22, fill="#12343C", outline="#27685F", width=2)
-    draw.text((72, y + 20), "MONTHLY COLLECTION", font=muted_font, fill="#B3D3CE")
+    draw.rounded_rectangle((44, y, width - 44, y + 116), radius=22, fill=palette["progress_card"], outline=palette["progress_outline"], width=2)
+    draw.text((72, y + 20), "MONTHLY COLLECTION", font=muted_font, fill=palette["progress_muted"])
     draw.text((72, y + 52), f"{paid_count} of {member_count} members paid", font=section_font, fill=white)
     progress = paid_count / member_count if member_count else 0
     bar_left, bar_top, bar_width, bar_height = 650, y + 48, 450, 22
-    draw.rounded_rectangle((bar_left, bar_top, bar_left + bar_width, bar_top + bar_height), radius=11, fill="#294650")
+    draw.rounded_rectangle((bar_left, bar_top, bar_left + bar_width, bar_top + bar_height), radius=11, fill=palette["progress_track"])
     if progress:
         draw.rounded_rectangle((bar_left, bar_top, bar_left + max(18, round(bar_width * progress)), bar_top + bar_height), radius=11, fill=teal)
-    draw.text((650, y + 78), f"{progress:.0%} complete", font=muted_font, fill="#C2D4D0")
+    draw.text((650, y + 78), f"{progress:.0%} complete", font=muted_font, fill=palette["progress_text"])
 
     y += 154
     draw.text((52, y), "GOLD PORTFOLIO", font=section_font, fill=gold)
     if positions and member_count:
         group_gold_pnl = sum(float(position["P/L"]) for position in positions)
         per_member_gold_pnl = group_gold_pnl / member_count
-        per_member_color = teal if per_member_gold_pnl >= 0 else "#FF8796"
+        per_member_color = teal if per_member_gold_pnl >= 0 else red
         draw.text(
             (width - 54, y + 2),
             f"EQUAL-SHARE P/L / MEMBER  {per_member_gold_pnl:+,.2f} BHD",
@@ -421,10 +445,10 @@ def make_status_image(
     y += 68
     if positions:
         for position in positions:
-            pnl_color = teal if position["P/L"] >= 0 else "#FF8796"
-            draw.rounded_rectangle((44, y, width - 44, y + 96), radius=18, fill=card, outline="#69562F", width=2)
+            pnl_color = teal if position["P/L"] >= 0 else red
+            draw.rounded_rectangle((44, y, width - 44, y + 96), radius=18, fill=card, outline=palette["gold_outline"], width=2)
             draw.text((70, y + 15), f"{position['Holding']}  ·  {position['Weight']:g} g", font=body_font, fill=white)
-            draw.text((70, y + 53), f"RATE {money(position['Rate'])}/g  ·  COST {money(position['Cost'])}  ·  VALUE {money(position['Value'])}", font=muted_font, fill="#C0CDD1")
+            draw.text((70, y + 53), f"RATE {money(position['Rate'])}/g  ·  COST {money(position['Cost'])}  ·  VALUE {money(position['Value'])}", font=muted_font, fill=muted)
             pnl_text = f"{position['P/L']:+,.2f} BHD  ({position['P/L %']:+.2f}%)"
             draw.text((width - 72, y + 31), pnl_text, font=body_font, fill=pnl_color, anchor="ra")
             y += 110
@@ -437,24 +461,24 @@ def make_status_image(
     if pending_rows:
         section_top = y
         list_height = 58 + sum(row[2] + 10 for row in pending_rows)
-        draw.rounded_rectangle((38, section_top, width - 38, section_top + list_height), radius=26, fill="#13283A", outline="#2F6157", width=2)
-        draw.text((68, y + 20), f"PENDING MEMBERS  ·  THROUGH {month_label(month).upper()}", font=section_font, fill="#DDF3E8")
-        draw.text((width - 68, y + 25), f"{len(pending_rows)} MEMBERS", font=small_font, fill="#E4BD68", anchor="ra")
+        draw.rounded_rectangle((38, section_top, width - 38, section_top + list_height), radius=26, fill=palette["pending_card"], outline=palette["pending_outline"], width=2)
+        draw.text((68, y + 20), f"PENDING MEMBERS  ·  THROUGH {month_label(month).upper()}", font=section_font, fill=white)
+        draw.text((width - 68, y + 25), f"{len(pending_rows)} MEMBERS", font=small_font, fill=gold, anchor="ra")
         y += 64
         for detail, month_lines, row_height in pending_rows:
-            draw.rounded_rectangle((58, y, width - 58, y + row_height), radius=16, fill="#1A3042", outline="#2B4853", width=1)
+            draw.rounded_rectangle((58, y, width - 58, y + row_height), radius=16, fill=palette["pending_row"], outline=edge, width=1)
             draw.text((82, y + 10), detail["name"], font=body_font, fill=white)
             amount_text = f"{detail['month_count']} MONTH(S)  ·  {money(detail['amount'])} DUE"
-            draw.text((width - 82, y + 13), amount_text, font=small_font, fill="#FF9EAB", anchor="ra")
+            draw.text((width - 82, y + 13), amount_text, font=small_font, fill=red, anchor="ra")
             for line_index, line in enumerate(month_lines):
-                draw.text((82, y + 40 + line_index * 24), line, font=muted_font, fill="#B5C5CB")
+                draw.text((82, y + 40 + line_index * 24), line, font=muted_font, fill=palette["pending_text"])
             y += row_height + 10
     else:
-        draw.rounded_rectangle((44, y, width - 44, y + 88), radius=18, fill="#12343C", outline="#27685F", width=2)
+        draw.rounded_rectangle((44, y, width - 44, y + 88), radius=18, fill=palette["up_to_date"], outline=palette["progress_outline"], width=2)
         draw.text((72, y + 29), "ALL CONTRIBUTIONS ARE UP TO DATE", font=body_font, fill=teal)
 
     footer = f"KHAIR GROUP FUND  ·  Rates: Gulf News Bahrain  ·  Generated {datetime.now().astimezone().strftime('%d %b %Y, %H:%M')}"
-    draw.text((54, height - 48), footer, font=muted_font, fill="#8EA3AA")
+    draw.text((54, height - 48), footer, font=muted_font, fill=palette["footer"])
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
@@ -533,47 +557,54 @@ if LOGO_PATH.exists():
     logo_data = base64.b64encode(logo_buffer.getvalue()).decode("ascii")
 else:
     logo_data = ""
-with st.container(horizontal=True, horizontal_alignment="right", wrap=True):
-    theme_choice = st.segmented_control(
-        "Theme preview",
-        ["Khair Emerald", "Linen & Olive preview"],
-        default="Linen & Olive preview",
-        selection_mode="single",
-        label_visibility="collapsed",
-        key="khair_theme_choice",
-    )
+dark_mode = st.session_state.get("khair_dark_mode", False)
+motion_bg = "#1B303C" if dark_mode else "#DCEBE6"
+motion_gradient = "linear-gradient(90deg,#0F766E,#41DAAB,#D8B45C)"
+dark_overrides = """
+  [data-testid="stAppViewContainer"] { background:#0B1422; color:#F4FBF8; }
+  [data-testid="stSidebar"] { display:none !important; }
+  [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stMetric"] { background:#142337; border-color:#2B4853; }
+  [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"], [data-testid="stWidgetLabel"] { color:#D2DFDC; }
+  [data-testid="stBaseButton-primary"] { background:#19C6A0; border-color:#19C6A0; color:#0B1422; }
+  [data-testid="stBaseButton-primary"]:hover { background:#38D9B2; border-color:#38D9B2; color:#0B1422; }
+  [data-testid="stBaseButton-secondary"] { background:#17283B; border-color:#35564F; color:#DDF3E8; }
+  [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea { background:#142337; color:#F4FBF8; border-color:#35564F; }
+  [data-testid="stSelectbox"] [data-baseweb="select"] > div { background:#142337; color:#F4FBF8; border-color:#35564F; }
+  [data-testid="stRadio"] label { color:#E0ECE8; }
+  .khair-section-nav--footer { border-top-color:#2B4853; }
+  .khair-section-nav a { background:#172B35; color:#DDF3E8; border-color:#35564F; }
+  .khair-section-nav a:hover { background:#203C43; border-color:#4E8475; }
+  .khair-nav-icon { background:#245044; color:#BFF3E1; }
+""" if dark_mode else ""
 
-is_linen = theme_choice == "Linen & Olive preview"
-theme_class = "khair-hero linen-olive" if is_linen else "khair-hero"
-nav_active_bg = "#E8EFE5" if is_linen else "#E1F4ED"
-nav_active_color = "#496F58" if is_linen else "#0F766E"
-if is_linen:
-    st.html(
-        """
-        <style>
-          [data-testid="stAppViewContainer"] { background:#F5F2E9; }
-          [data-testid="stHeader"] { background:transparent; }
-          [data-testid="stVerticalBlockBorderWrapper"] { background:#FBFAF6; border-color:#E3DECF; }
-          [data-testid="stMetric"] { background:#FBFAF6; border-color:#E3DECF; }
-          [data-testid="stTabs"] button[aria-selected="true"] { color:#496F58; border-bottom-color:#6B8A68; }
-          [data-testid="stBaseButton-primary"] { background:#496F58; border-color:#496F58; }
-          [data-testid="stProgressBar"] > div > div { background:#789673; }
-          .khair-motion { background:#E6E2D4 !important; }
-          .khair-motion::after { background:linear-gradient(90deg,#47735B,#8FA47B,#C5A76A) !important; }
-          .khair-hero.linen-olive { color:#293D34; background:linear-gradient(105deg,#FCFBF6 0%,#F0EEE3 68%,#E8EDDF 100%);
-            border:1px solid #E1DDCE; border-radius:16px; box-shadow:0 10px 28px #263b2d0d; }
-          .khair-hero.linen-olive .khair-brand { color:#293D34; font-family:Georgia,serif; letter-spacing:0; }
-          .khair-hero.linen-olive .khair-brand span { color:#66866B !important; }
-          .khair-hero.linen-olive .khair-subtitle { color:#748075; }
-        </style>
-        """
+SECTION_LINKS = [
+    ("overview", "Overview", "◈"),
+    ("members", "Members", "♙"),
+    ("fund-ledger", "Fund ledger", "◉"),
+    ("share-reminders", "Share & reminders", "↗"),
+]
+
+
+def render_section_nav(*, footer: bool = False) -> None:
+    nav_class = "khair-section-nav khair-section-nav--footer" if footer else "khair-section-nav"
+    links = "".join(
+        f'<a href="#{anchor}"><span class="khair-nav-icon" aria-hidden="true">{icon}</span>{label}</a>'
+        for anchor, label, icon in SECTION_LINKS
     )
+    st.html(f'<nav class="{nav_class}" aria-label="Dashboard sections">{links}</nav>')
+
+
+def render_section_accent() -> None:
+    st.html('<div class="khair-heading-accent" aria-hidden="true"><span></span></div>')
 
 st.html(
     f"""
     <style>
-      [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {{ display: none !important; }}
+      [data-testid="stSidebar"], [data-testid="stSidebarCollapsedControl"] {{ display:none !important; }}
       section.main > div {{ padding-top: 1.3rem; }}
+      [data-testid="stBaseButton-primary"] {{ background:#0F766E; border-color:#0F766E; color:#FFFFFF; }}
+      [data-testid="stBaseButton-primary"]:hover {{ background:#0B655D; border-color:#0B655D; color:#FFFFFF; }}
+      [data-testid="stBaseButton-secondary"] {{ border-color:#B8CEC5; color:#0F766E; background:#FFFFFF; }}
       .khair-hero {{ display:flex; align-items:center; gap:16px; padding:17px 22px; margin-bottom:12px;
         border-radius:24px; color:#effcf8; background:radial-gradient(ellipse at 5% 5%,#136e62 0%,transparent 48%),
         linear-gradient(115deg,#101a2d 0%,#17283b 58%,#123d39 100%); box-shadow:0 16px 40px #102c281f; }}
@@ -582,17 +613,31 @@ st.html(
       .khair-logo-frame img {{ width:62px; height:62px; object-fit:contain; border-radius:15px; }}
       .khair-brand {{ font:700 29px/1.1 sans-serif; letter-spacing:-.7px; }}
       .khair-subtitle {{ margin-top:7px; color:#b9cbc9; font:500 14px/1.45 sans-serif; }}
-      [data-testid="stTabs"] [role="tablist"] {{ display:flex; gap:10px; border-bottom:0; flex-wrap:wrap; }}
-      [data-testid="stTabs"] button[role="tab"] {{ min-height:48px; padding:10px 18px; border:1px solid #DCE6E2;
-        border-radius:13px; background:#FFFFFF; font-weight:650; transition:background .18s ease,box-shadow .18s ease; }}
-      [data-testid="stTabs"] button[role="tab"]:hover {{ border-color:#8EB8A5; background:#F5FAF7; }}
-      [data-testid="stTabs"] button[role="tab"][aria-selected="true"] {{ color:{nav_active_color}; background:{nav_active_bg};
-        border-color:#8AB8A2; box-shadow:0 3px 12px #224b3510; }}
-      [data-testid="stTabs"] [role="tabpanel"] {{ padding-top:1rem; }}
+      .khair-section-nav {{ display:flex; gap:10px; flex-wrap:wrap; margin:8px 0 22px; }}
+      .khair-section-nav--footer {{ margin:18px 0 36px; padding:12px 0; border-top:1px solid #DDE9E3; }}
+      .khair-section-nav a {{ display:inline-flex; align-items:center; gap:8px; padding:9px 15px; border-radius:999px;
+        background:#E5F3ED; color:#0F766E; border:1px solid #C7E2D6; font-weight:650; text-decoration:none;
+        transition:transform .2s ease, background .2s ease, box-shadow .2s ease; }}
+      .khair-section-nav a:hover {{ background:#D8EEE4; border-color:#8AB8A2; transform:translateY(-2px); box-shadow:0 5px 14px #0F766E20; }}
+      .khair-nav-icon {{ display:inline-grid; place-items:center; min-width:20px; height:20px; border-radius:50%;
+        background:#C7E8D9; font-size:14px; animation:khair-icon-float 3.2s ease-in-out infinite; }}
+      .khair-section-nav a:nth-child(2) .khair-nav-icon {{ animation-delay:.25s; }}
+      .khair-section-nav a:nth-child(3) .khair-nav-icon {{ animation-delay:.5s; }}
+      .khair-section-nav a:nth-child(4) .khair-nav-icon {{ animation-delay:.75s; }}
+      @keyframes khair-icon-float {{ 0%,100% {{ transform:translateY(0); }} 50% {{ transform:translateY(-3px); }} }}
+      .khair-heading-accent {{ width:100%; height:3px; margin:-13px 0 22px; overflow:hidden; border-radius:5px;
+        background:linear-gradient(90deg,#C7E8D9,#E9D7A5,#C7E8D9); }}
+      .khair-heading-accent span {{ display:block; height:100%; width:22%; border-radius:inherit;
+        background:linear-gradient(90deg,#0F766E,#55DFBD,#D8B45C); animation:khair-heading-sweep 5s ease-in-out infinite; }}
+      @keyframes khair-heading-sweep {{ from {{ transform:translateX(-110%); }} to {{ transform:translateX(520%); }} }}
+      @media (prefers-reduced-motion: reduce) {{ .khair-nav-icon, .khair-heading-accent span {{ animation:none; }} }}
+      [data-testid="stAppViewContainer"] #members, [data-testid="stAppViewContainer"] #fund-ledger,
+      [data-testid="stAppViewContainer"] #share-reminders, [data-testid="stAppViewContainer"] #overview {{ scroll-margin-top:24px; }}
       @media(max-width:620px) {{ .khair-hero {{ padding:14px 16px; gap:12px; }} .khair-logo-frame {{ width:54px;height:54px;flex-basis:54px; }}
         .khair-logo-frame img {{ width:52px;height:52px; }} .khair-brand {{ font-size:25px; }} }}
+      {dark_overrides}
     </style>
-    <header class="{theme_class}" aria-label="Khair group fund dashboard">
+    <header class="khair-hero" aria-label="Khair group fund dashboard">
       <div class="khair-logo-frame">{'<img alt="Khair logo" src="data:image/png;base64,' + logo_data + '">' if logo_data else '<span style="font-size:34px;font-weight:bold">خ</span>'}</div>
       <div><div class="khair-brand">Khair <span style="color:#55dfbd">·</span> Group Fund</div>
         <div class="khair-subtitle">Contributions, member activity &amp; investment overview</div>
@@ -609,15 +654,16 @@ with st.container(
 ):
     st.caption("Live overview · Khair members and fund")
     refresh_clicked = st.button("Refresh data", icon=":material/refresh:", type="primary")
+    dark_mode_toggle = st.toggle("Dark mode", value=dark_mode, key="khair_dark_mode")
 
 st.html(
-    """
+    f"""
     <style>
-    @keyframes khair-sweep { from { transform: translateX(-115%); } to { transform: translateX(430%); } }
-    .khair-motion { height: 4px; width: 100%; overflow: hidden; border-radius: 8px; background: #dcebe6; }
-    .khair-motion::after { content: ""; display: block; height: 100%; width: 24%; border-radius: inherit;
-      background: linear-gradient(90deg, #0f766e, #41daab, #f0d78a); animation: khair-sweep 8s ease-in-out infinite; }
-    @media (prefers-reduced-motion: reduce) { .khair-motion::after { animation: none; width: 100%; opacity: .55; } }
+    @keyframes khair-sweep {{ from {{ transform: translateX(-115%); }} to {{ transform: translateX(430%); }} }}
+    .khair-motion {{ height: 4px; width: 100%; overflow: hidden; border-radius: 8px; background: {motion_bg}; }}
+    .khair-motion::after {{ content: ""; display: block; height: 100%; width: 24%; border-radius: inherit;
+      background: {motion_gradient}; animation: khair-sweep 8s ease-in-out infinite; }}
+    @media (prefers-reduced-motion: reduce) {{ .khair-motion::after {{ animation: none; width: 100%; opacity: .55; }} }}
     </style>
     <div class="khair-motion" aria-hidden="true"></div>
     """
@@ -701,12 +747,11 @@ with st.container(horizontal=True):
     st.metric("Outstanding", money(due_amount), f"{due_this_month} members", border=True)
     st.metric("Fund balance", money(balance) if balance is not None else "Not listed", border=True)
 
-st.caption("Choose a section to see its details")
-overview_tab, members_tab, ledger_tab, whatsapp_tab = st.tabs(
-    ["📊 Overview", "👥 Members", "📒 Fund ledger", "✉️ Share & reminders"]
-)
+render_section_nav()
 
-with overview_tab:
+with st.container():
+    st.header(":material/dashboard: Overview", anchor="overview")
+    render_section_accent()
     st.subheader("Gold portfolio")
     if positions:
         rate_col, pnl_col = st.columns([1.7, 1], gap="medium")
@@ -765,10 +810,7 @@ with overview_tab:
             st.subheader("Collection trend")
             chart_data = monthly.copy()
             chart_data["Month label"] = chart_data["Month"].map(month_label)
-            if is_linen:
-                wave_colors = ("#DEE8D6", "#A8BE9B", "#496F58", "#B69B64")
-            else:
-                wave_colors = ("#BCEBDD", "#48C99F", "#0F766E", "#D8B45C")
+            wave_colors = ("#BCEBDD", "#48C99F", "#0F766E", "#D8B45C")
             base = alt.Chart(chart_data).encode(
                 x=alt.X("Month label:N", title=None, sort=chart_data["Month label"].tolist(), axis=alt.Axis(labelAngle=0)),
                 tooltip=[
@@ -840,7 +882,11 @@ with overview_tab:
                 alt="The eight members with the most unpaid months through the selected month",
             )
 
-with members_tab:
+render_section_nav(footer=True)
+
+with st.container():
+    st.header(":material/groups: Members", anchor="members")
+    render_section_accent()
     st.subheader("Member payments")
     search_col, month_col, status_col = st.columns([1.25, 1, 1], gap="medium")
     with search_col:
@@ -905,8 +951,11 @@ with members_tab:
             matrix[month] = matrix[month].map(lambda amount: "✓" if amount > 0 else "—")
         st.dataframe(matrix, hide_index=True, alt="Full member payment history by month")
 
-with ledger_tab:
-    st.subheader("Fund ledger")
+render_section_nav(footer=True)
+
+with st.container():
+    st.header(":material/account_balance_wallet: Fund ledger", anchor="fund-ledger")
+    render_section_accent()
     st.caption("Values below are read from the ledger rows in the source sheet.")
     ledger_items = [
         ("Balance", "balance"),
@@ -935,7 +984,11 @@ with ledger_tab:
         alt="Monthly contribution totals and expected target",
     )
 
-with whatsapp_tab:
+render_section_nav(footer=True)
+
+with st.container():
+    st.header(":material/campaign: Share & reminders", anchor="share-reminders")
+    render_section_accent()
     st.subheader("Share a group update")
     st.caption(
         "Choose text to open a pre-filled WhatsApp draft, or download a status image "
@@ -946,6 +999,13 @@ with whatsapp_tab:
         ["Text", "Image"],
         default="Text",
         selection_mode="single",
+    )
+    image_appearance = st.segmented_control(
+        "WhatsApp image theme",
+        ["Dark", "Light"],
+        default="Dark",
+        selection_mode="single",
+        key="whatsapp_image_appearance",
     )
     share_col, share_options = st.columns([1.45, 1], gap="large")
     with share_options:
@@ -1026,6 +1086,7 @@ with whatsapp_tab:
                 balance=balance,
                 positions=positions if include_gold else [],
                 pending_details=pending_details if include_pending_names else [],
+                appearance=image_appearance.lower(),
             )
             st.image(image_bytes, alt="Khair group update card for WhatsApp sharing")
             st.download_button(
@@ -1158,6 +1219,7 @@ with whatsapp_tab:
                     balance=balance,
                     positions=positions if include_gold else [],
                     pending_details=pending_details if include_pending_names else [],
+                    appearance=image_appearance.lower(),
                 )
                 email_recipients = [recipient_options[label] for label in selected_recipients]
                 email_draft = make_inline_email_draft(
@@ -1193,4 +1255,5 @@ with whatsapp_tab:
             else:
                 st.caption("Select at least one member to prepare the email draft.")
 
+render_section_nav(footer=True)
 st.caption("Khair · Group fund dashboard · Read-only connection")
