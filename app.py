@@ -28,8 +28,8 @@ SHEET_CSV_URL = (
 LOGO_PATH = Path(__file__).resolve().parent / "assets" / "khair-logo.png"
 BAHRAIN_GOLD_URL = "https://gulfnews.com/gold-forex/bahrain-gold-prices"
 HOLDINGS = {
-    "22K gold": {"karat": 22, "grams": 7.7, "cost": 430.0},
-    "24K biscuit": {"karat": 24, "grams": 10.0, "cost": 621.0},
+    "22K gold": {"karat": 22, "grams": 7.7},
+    "24K biscuit": {"karat": 24, "grams": 10.0},
 }
 MONTH_RE = re.compile(r"^[A-Za-z]{3}-\d{2}$")
 MONEY_RE = re.compile(r"^[+-]?(?:\d[\d,]*\.?\d*|\.\d+)$")
@@ -51,7 +51,7 @@ def cell_number(value: str | None) -> float | None:
         return None
     negative = value.startswith("(") and value.endswith(")")
     raw = value[1:-1] if negative else value
-    raw = raw.replace(",", "").replace("BHD", "").strip()
+    raw = re.sub(r"\b(?:BHD|BD)\b", "", raw, flags=re.IGNORECASE).replace(",", "").strip()
     if not MONEY_RE.match(raw):
         return None
     number = float(raw)
@@ -145,6 +145,7 @@ def parse_sheet(text: str) -> dict:
     monthly_fee = median(amounts) if amounts else 10.0
 
     ledger: dict[str, float] = {}
+    gold_purchase_values: dict[int, float | None] = {22: None, 24: None}
     known_labels = (
         "reg. fee",
         "meeting exp.",
@@ -155,6 +156,20 @@ def parse_sheet(text: str) -> dict:
         "balance",
     )
     for row in rows[next_row:]:
+        for index, cell in enumerate(row):
+            gold_match = re.search(r"\bgold\s*(22|24)\s*k\b", cell.strip(), re.IGNORECASE)
+            if gold_match:
+                purchase_value = next(
+                    (
+                        parsed
+                        for candidate in row[index + 1 :]
+                        if (parsed := cell_number(candidate)) is not None
+                    ),
+                    None,
+                )
+                if purchase_value is not None:
+                    gold_purchase_values[int(gold_match.group(1))] = purchase_value
+
         for index, cell in enumerate(row):
             label = cell.strip().lower()
             if label in known_labels:
@@ -188,6 +203,7 @@ def parse_sheet(text: str) -> dict:
         "monthly": pd.DataFrame(monthly),
         "ledger": ledger,
         "monthly_fee": monthly_fee,
+        "gold_purchase_values": gold_purchase_values,
         "has_phone_column": phone_index is not None,
         "has_email_column": email_index is not None,
         "loaded_at": datetime.now().astimezone(),
@@ -297,23 +313,36 @@ def fetch_gold_rates() -> dict:
     }
 
 
-def gold_positions(rates: dict | None) -> list[dict]:
-    if not rates:
+def gold_positions(
+    rates: dict | None, purchase_values: dict[int, float | None]
+) -> list[dict]:
+    if not rates or any(purchase_values.get(karat) is None for karat in (22, 24)):
         return []
     positions = []
     for name, holding in HOLDINGS.items():
         rate = float(rates[f"{holding['karat']}K"])
         value = rate * holding["grams"]
-        pnl = value - holding["cost"]
+        sheet_purchase_value = float(purchase_values[holding["karat"]])
+        # The sheet may hold either the total paid amount (e.g. 430 BHD) or
+        # a per-gram purchase rate. Convert both forms to a consistent cost basis.
+        if sheet_purchase_value > 150:
+            cost = sheet_purchase_value
+            purchase_rate = cost / holding["grams"]
+        else:
+            purchase_rate = sheet_purchase_value
+            cost = purchase_rate * holding["grams"]
+        pnl = value - cost
         positions.append(
             {
                 "Holding": name,
                 "Weight": holding["grams"],
                 "Rate": rate,
-                "Cost": holding["cost"],
+                "Purchase rate": purchase_rate,
+                "Purchase input": sheet_purchase_value,
+                "Cost": cost,
                 "Value": value,
                 "P/L": pnl,
-                "P/L %": pnl / holding["cost"] * 100,
+                "P/L %": pnl / cost * 100 if cost else 0.0,
             }
         )
     return positions
@@ -351,26 +380,26 @@ def make_status_image(
     height = max(1120, 950 + gold_count * 110 + pending_content_height)
     palette = {
         "dark": {
-            "background": "#0B1422", "hero": "#102A34", "logo_back": "#0D1B2B",
-            "hero_outline": "#236258", "hero_muted": "#A6C5C3", "white": "#F4FBF8",
-            "muted": "#A9BBC0", "card": "#142337", "edge": "#2B4853",
-            "progress_card": "#12343C", "progress_outline": "#27685F",
-            "progress_muted": "#B3D3CE", "progress_track": "#294650",
-            "progress_text": "#C2D4D0", "gold_outline": "#69562F",
-            "pending_card": "#13283A", "pending_outline": "#2F6157",
-            "pending_row": "#1A3042", "pending_text": "#B5C5CB", "footer": "#8EA3AA",
-            "up_to_date": "#12343C",
+            "background": "#0D1822", "hero": "#102B31", "logo_back": "#0B1822",
+            "hero_outline": "#286257", "hero_muted": "#A8C9C1", "white": "#F2FBF7",
+            "muted": "#A8B9B8", "card": "#142630", "edge": "#29454C",
+            "progress_card": "#103B37", "progress_outline": "#2D7465",
+            "progress_muted": "#B3D9CE", "progress_track": "#29454A",
+            "progress_text": "#C8DDD7", "gold_outline": "#705C35",
+            "pending_card": "#142C35", "pending_outline": "#37675D",
+            "pending_row": "#1A333B", "pending_text": "#BED0CC", "footer": "#94AAA7",
+            "up_to_date": "#103B37",
         },
         "light": {
-            "background": "#F3F8F5", "hero": "#E1F1E9", "logo_back": "#102A34",
-            "hero_outline": "#9CCDB8", "hero_muted": "#47736A", "white": "#17352E",
-            "muted": "#5E756E", "card": "#FFFFFF", "edge": "#C7DDD2",
-            "progress_card": "#E2F3EB", "progress_outline": "#A8D3BE",
-            "progress_muted": "#416B60", "progress_track": "#C8E0D4",
-            "progress_text": "#416B60", "gold_outline": "#D9C58F",
-            "pending_card": "#E7F2EC", "pending_outline": "#A9CDBB",
-            "pending_row": "#FFFFFF", "pending_text": "#536D64", "footer": "#71857E",
-            "up_to_date": "#E2F3EB",
+            "background": "#F2F7F5", "hero": "#FFFFFF", "logo_back": "#102B31",
+            "hero_outline": "#D7E7DF", "hero_muted": "#55746B", "white": "#17312D",
+            "muted": "#657871", "card": "#FFFFFF", "edge": "#D8E7E1",
+            "progress_card": "#E8F4EE", "progress_outline": "#B8D8CA",
+            "progress_muted": "#416B5F", "progress_track": "#CFE5DA",
+            "progress_text": "#416B5F", "gold_outline": "#D8C58D",
+            "pending_card": "#EAF3EF", "pending_outline": "#C9DED4",
+            "pending_row": "#FFFFFF", "pending_text": "#657871", "footer": "#788C85",
+            "up_to_date": "#E8F4EE",
         },
     }[appearance]
     image = Image.new("RGB", (width, height), palette["background"])
@@ -383,9 +412,9 @@ def make_status_image(
     muted_font = font(17)
     white = palette["white"]
     muted = palette["muted"]
-    teal = "#0F766E" if appearance == "light" else "#19C6A0"
-    gold = "#987126" if appearance == "light" else "#E4BD68"
-    red = "#B83E51" if appearance == "light" else "#D54D65"
+    teal = "#0F766E" if appearance == "light" else "#38D6AD"
+    gold = "#A47720" if appearance == "light" else "#E4BD68"
+    red = "#B9435A" if appearance == "light" else "#F07C8D"
     card = palette["card"]
     edge = palette["edge"]
 
@@ -405,8 +434,8 @@ def make_status_image(
     y = 252
     cards = [
         ("TOTAL COLLECTED", money(total_collected), teal),
-        ("THIS MONTH", money(month_collected), "#5DC7E8"),
-        ("OUTSTANDING", money(due_amount), "#F07C8D"),
+        ("THIS MONTH", money(month_collected), "#527C96"),
+        ("OUTSTANDING", money(due_amount), red),
         ("FUND BALANCE", money(balance) if balance is not None else "Not listed", gold),
     ]
     for index, (label, value, accent) in enumerate(cards):
@@ -448,13 +477,13 @@ def make_status_image(
             pnl_color = teal if position["P/L"] >= 0 else red
             draw.rounded_rectangle((44, y, width - 44, y + 96), radius=18, fill=card, outline=palette["gold_outline"], width=2)
             draw.text((70, y + 15), f"{position['Holding']}  ·  {position['Weight']:g} g", font=body_font, fill=white)
-            draw.text((70, y + 53), f"RATE {money(position['Rate'])}/g  ·  COST {money(position['Cost'])}  ·  VALUE {money(position['Value'])}", font=muted_font, fill=muted)
+            draw.text((70, y + 53), f"LIVE {money(position['Rate'])}/g  ·  BUY {money(position['Purchase rate'])}/g  ·  COST {money(position['Cost'])}  ·  VALUE {money(position['Value'])}", font=muted_font, fill=muted)
             pnl_text = f"{position['P/L']:+,.2f} BHD  ({position['P/L %']:+.2f}%)"
             draw.text((width - 72, y + 31), pnl_text, font=body_font, fill=pnl_color, anchor="ra")
             y += 110
     else:
         draw.rounded_rectangle((44, y, width - 44, y + 96), radius=18, fill=card, outline=edge, width=2)
-        draw.text((70, y + 34), "Live Bahrain gold rate unavailable", font=body_font, fill=muted)
+        draw.text((70, y + 34), "Gold purchase value or live rate unavailable", font=body_font, fill=muted)
         y += 110
 
     y += 18
@@ -493,11 +522,11 @@ def make_inline_email_draft(
     message["Subject"] = subject
     message.set_content(body)
     html_body = (
-        '<html><body style="margin:0;background:#f3f0e7;padding:24px;'
-        'font-family:Arial,sans-serif;color:#253936">'
+        '<html><body style="margin:0;background:#f2f7f5;padding:24px;'
+        'font-family:Arial,sans-serif;color:#17312d">'
         '<div style="max-width:760px;margin:auto">'
         f'<p style="font-size:16px;line-height:1.6;white-space:pre-line">{escape(body)}</p>'
-        '<p style="font-weight:bold;color:#1c6556">Khair group fund update</p>'
+        '<p style="font-weight:bold;color:#0f766e">Khair group fund update</p>'
         '<img src="cid:khair-summary" alt="Khair group fund summary" '
         'style="display:block;width:100%;max-width:720px;height:auto;border-radius:16px">'
         '</div></body></html>'
@@ -561,20 +590,36 @@ dark_mode = st.session_state.get("khair_dark_mode", False)
 motion_bg = "#1B303C" if dark_mode else "#DCEBE6"
 motion_gradient = "linear-gradient(90deg,#0F766E,#41DAAB,#D8B45C)"
 dark_overrides = """
-  [data-testid="stAppViewContainer"] { background:#0B1422; color:#F4FBF8; }
+  [data-testid="stAppViewContainer"] { background:#0D1822; color:#F2FBF7; }
   [data-testid="stSidebar"] { display:none !important; }
-  [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stMetric"] { background:#142337; border-color:#2B4853; }
-  [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"], [data-testid="stWidgetLabel"] { color:#D2DFDC; }
-  [data-testid="stBaseButton-primary"] { background:#19C6A0; border-color:#19C6A0; color:#0B1422; }
-  [data-testid="stBaseButton-primary"]:hover { background:#38D9B2; border-color:#38D9B2; color:#0B1422; }
-  [data-testid="stBaseButton-secondary"] { background:#17283B; border-color:#35564F; color:#DDF3E8; }
-  [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea { background:#142337; color:#F4FBF8; border-color:#35564F; }
-  [data-testid="stSelectbox"] [data-baseweb="select"] > div { background:#142337; color:#F4FBF8; border-color:#35564F; }
+  [data-testid="stVerticalBlockBorderWrapper"], [data-testid="stMetric"] { background:#142630; border-color:#29454C; }
+  [data-testid="stMarkdownContainer"], [data-testid="stCaptionContainer"], [data-testid="stWidgetLabel"] { color:#D5E4DF; }
+  [data-testid="stBaseButton-primary"] { background:#19A88A; border-color:#19A88A; color:#071A18; }
+  [data-testid="stBaseButton-primary"]:hover { background:#38D6AD; border-color:#38D6AD; color:#071A18; }
+  [data-testid="stBaseButton-secondary"] { background:#172B35; border-color:#35564F; color:#DDF3E8; }
+  [data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea { background:#142630; color:#F2FBF7; border-color:#35564F; }
+  [data-testid="stSelectbox"] [data-baseweb="select"] > div { background:#142630; color:#F2FBF7; border-color:#35564F; }
   [data-testid="stRadio"] label { color:#E0ECE8; }
-  .khair-section-nav--footer { border-top-color:#2B4853; }
-  .khair-section-nav a { background:#172B35; color:#DDF3E8; border-color:#35564F; }
-  .khair-section-nav a:hover { background:#203C43; border-color:#4E8475; }
-  .khair-nav-icon { background:#245044; color:#BFF3E1; }
+  .khair-hero { background:radial-gradient(ellipse at 8% 0%,#145448 0%,transparent 38%),linear-gradient(115deg,#10222D 0%,#16323B 64%,#0D3D36 100%); color:#F2FBF7; border-color:#27564F; }
+  .khair-brand { color:#F2FBF7; }
+  .khair-subtitle { color:#B9CBC9; }
+  .khair-section-nav--footer { border-top-color:#29454C; }
+  .khair-section-nav a { background:#142630; color:#DDF3E8; border-color:#29454C; }
+  .khair-section-nav a:hover { background:#1B3A3E; border-color:#38D6AD; }
+  .khair-nav-icon { background:#1D4A42; color:#B8F2DD; }
+  .khair-heading-accent { background:linear-gradient(90deg,#26444A,#315D56,#26444A); }
+  .khair-infographic-card { background:#142630; border-color:#29454C; color:#F2FBF7; }
+  .khair-infographic-hint, .khair-infographic-label { color:#A8B9B8; }
+  .khair-infographic-icon { background:#1D4A42; color:#B8F2DD; }
+  .khair-icon-blue { background:#203D4C; color:#9BCBE0; }
+  .khair-icon-coral { background:#4A3038; color:#F3A3AE; }
+  .khair-icon-gold { background:#473F2C; color:#E8D091; }
+  .khair-progress-band { background:linear-gradient(115deg,#103B37,#173941); border-color:#2D7465; }
+  .khair-progress-track { background:#29454A; }
+  .khair-progress-ring { --progress-color:#38D6AD; --progress-track:#29454A; }
+  .khair-progress-ring::before { background:#103B37; }
+  .khair-progress-ring span, .khair-progress-heading strong { color:#F2FBF7; }
+  .khair-progress-heading span { color:#B5D5CC; }
 """ if dark_mode else ""
 
 SECTION_LINKS = [
@@ -597,6 +642,38 @@ def render_section_nav(*, footer: bool = False) -> None:
 def render_section_accent() -> None:
     st.html('<div class="khair-heading-accent" aria-hidden="true"><span></span></div>')
 
+
+def render_infographic_summary(
+    *, total: float, monthly_total: float, outstanding: float, balance: float | None,
+    paid: int, member_count: int, completion: float, month: str,
+) -> None:
+    completion_pct = min(100, max(0, round(completion * 100)))
+    due_count = max(0, member_count - paid)
+    cards = [
+        ("Total contributions", "✦", money(total), "Collected across the fund", "emerald"),
+        (f"{month_label(month)} collected", "◷", money(monthly_total), f"{paid} members have paid", "blue"),
+        ("Still outstanding", "!", money(outstanding), f"{due_count} members to follow up", "coral"),
+        ("Fund balance", "◇", money(balance) if balance is not None else "Not listed", "Available fund balance", "gold"),
+    ]
+    card_html = "".join(
+        '<article class="khair-infographic-card">'
+        f'<div class="khair-infographic-top"><span class="khair-infographic-label">{escape(label)}</span>'
+        f'<span class="khair-infographic-icon khair-icon-{tone}" aria-hidden="true">{icon}</span></div>'
+        f'<div class="khair-infographic-value">{escape(value)}</div>'
+        f'<div class="khair-infographic-hint">{escape(hint)}</div></article>'
+        for label, icon, value, hint, tone in cards
+    )
+    st.html(
+        f'<div class="khair-infographic-grid">{card_html}</div>'
+        '<section class="khair-progress-band" aria-label="Monthly contribution progress">'
+        '<div class="khair-progress-layout">'
+        f'<div class="khair-progress-ring" style="--progress-angle:{completion_pct * 3.6:.1f}deg"><span>{completion_pct}%</span></div>'
+        '<div class="khair-progress-copy"><div class="khair-progress-heading">'
+        f'<strong>Monthly contribution progress</strong><span>{paid} of {member_count} members paid</span></div>'
+        '<div class="khair-progress-track"><div class="khair-progress-fill" '
+        f'style="width:{completion_pct}%"></div></div></div></div></section>'
+    )
+
 st.html(
     f"""
     <style>
@@ -606,29 +683,61 @@ st.html(
       [data-testid="stBaseButton-primary"]:hover {{ background:#0B655D; border-color:#0B655D; color:#FFFFFF; }}
       [data-testid="stBaseButton-secondary"] {{ border-color:#B8CEC5; color:#0F766E; background:#FFFFFF; }}
       .khair-hero {{ display:flex; align-items:center; gap:16px; padding:17px 22px; margin-bottom:12px;
-        border-radius:24px; color:#effcf8; background:radial-gradient(ellipse at 5% 5%,#136e62 0%,transparent 48%),
-        linear-gradient(115deg,#101a2d 0%,#17283b 58%,#123d39 100%); box-shadow:0 16px 40px #102c281f; }}
+        border:1px solid #D7E7DF; border-top:3px solid #0F766E; border-radius:20px; color:#17312D;
+        background:radial-gradient(ellipse at 8% 0%,#E4F5ED 0%,transparent 46%),#FFFFFF; box-shadow:0 10px 28px #123D3110; }}
       .khair-logo-frame {{ width:64px; height:64px; flex:0 0 64px; display:grid; place-items:center;
         border-radius:17px; background:transparent; }}
       .khair-logo-frame img {{ width:62px; height:62px; object-fit:contain; border-radius:15px; }}
-      .khair-brand {{ font:700 29px/1.1 sans-serif; letter-spacing:-.7px; }}
-      .khair-subtitle {{ margin-top:7px; color:#b9cbc9; font:500 14px/1.45 sans-serif; }}
+      .khair-brand {{ color:#17312D; font:700 29px/1.1 sans-serif; letter-spacing:-.6px; }}
+      .khair-subtitle {{ margin-top:7px; color:#657871; font:500 14px/1.45 sans-serif; }}
       .khair-section-nav {{ display:flex; gap:10px; flex-wrap:wrap; margin:8px 0 22px; }}
       .khair-section-nav--footer {{ margin:18px 0 36px; padding:12px 0; border-top:1px solid #DDE9E3; }}
       .khair-section-nav a {{ display:inline-flex; align-items:center; gap:8px; padding:9px 15px; border-radius:999px;
-        background:#E5F3ED; color:#0F766E; border:1px solid #C7E2D6; font-weight:650; text-decoration:none;
+        background:#FFFFFF; color:#35564F; border:1px solid #D7E7DF; font-weight:650; text-decoration:none;
         transition:transform .2s ease, background .2s ease, box-shadow .2s ease; }}
-      .khair-section-nav a:hover {{ background:#D8EEE4; border-color:#8AB8A2; transform:translateY(-2px); box-shadow:0 5px 14px #0F766E20; }}
+      .khair-section-nav a:hover {{ background:#E6F4EE; color:#0F766E; border-color:#9AC8B3; transform:translateY(-2px); box-shadow:0 6px 16px #0F766E1F; }}
       .khair-nav-icon {{ display:inline-grid; place-items:center; min-width:20px; height:20px; border-radius:50%;
-        background:#C7E8D9; font-size:14px; animation:khair-icon-float 3.2s ease-in-out infinite; }}
+        background:#DDF1E7; color:#0F766E; font-size:13px; animation:khair-icon-float 4s ease-in-out infinite; }}
       .khair-section-nav a:nth-child(2) .khair-nav-icon {{ animation-delay:.25s; }}
       .khair-section-nav a:nth-child(3) .khair-nav-icon {{ animation-delay:.5s; }}
       .khair-section-nav a:nth-child(4) .khair-nav-icon {{ animation-delay:.75s; }}
       @keyframes khair-icon-float {{ 0%,100% {{ transform:translateY(0); }} 50% {{ transform:translateY(-3px); }} }}
       .khair-heading-accent {{ width:100%; height:3px; margin:-13px 0 22px; overflow:hidden; border-radius:5px;
-        background:linear-gradient(90deg,#C7E8D9,#E9D7A5,#C7E8D9); }}
+        background:linear-gradient(90deg,#C8E5D7,#E8D6A7,#C8E5D7); }}
       .khair-heading-accent span {{ display:block; height:100%; width:22%; border-radius:inherit;
-        background:linear-gradient(90deg,#0F766E,#55DFBD,#D8B45C); animation:khair-heading-sweep 5s ease-in-out infinite; }}
+        background:linear-gradient(90deg,#0F766E,#41DAAB,#D8B45C); animation:khair-heading-sweep 6s ease-in-out infinite; }}
+      .khair-infographic-grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin:14px 0; }}
+      .khair-infographic-card {{ position:relative; min-height:132px; padding:17px 18px 15px; overflow:hidden;
+        border:1px solid #D7E7DF; border-radius:18px; background:#FFFFFF; color:#17312D;
+        box-shadow:0 6px 18px #123D310B; }}
+      .khair-infographic-card::after {{ content:""; position:absolute; right:-32px; bottom:-44px; width:112px; height:112px;
+        border:1px solid #0F766E18; border-radius:50%; box-shadow:0 0 0 14px #0F766E08,0 0 0 29px #0F766E05; pointer-events:none; }}
+      .khair-infographic-card > * {{ position:relative; z-index:1; }}
+      .khair-infographic-top {{ display:flex; align-items:center; justify-content:space-between; gap:8px; }}
+      .khair-infographic-icon {{ display:grid; place-items:center; width:31px; height:31px; border-radius:10px;
+        background:#E1F2E9; color:#0F766E; font-size:16px; font-weight:700; }}
+      .khair-icon-blue {{ background:#E5F0F5; color:#3C7D98; }}
+      .khair-icon-coral {{ background:#F8E8E9; color:#B9435A; }}
+      .khair-icon-gold {{ background:#F5F0E2; color:#A47720; }}
+      .khair-infographic-label {{ color:#657871; font-size:12px; font-weight:700; letter-spacing:.09em; text-transform:uppercase; }}
+      .khair-infographic-value {{ margin-top:13px; font-size:25px; line-height:1.1; font-weight:750; letter-spacing:-.04em; }}
+      .khair-infographic-hint {{ margin-top:5px; color:#71827C; font-size:12px; }}
+      .khair-progress-band {{ margin:12px 0 28px; padding:17px 20px; border:1px solid #B9D9CB; border-radius:18px;
+        background:linear-gradient(115deg,#E8F5EE,#F8FBF9 68%,#F4EEDF); }}
+      .khair-progress-heading {{ display:flex; align-items:baseline; justify-content:space-between; gap:12px; margin-bottom:10px; }}
+      .khair-progress-heading strong {{ color:#17312D; font-size:15px; }}
+      .khair-progress-heading span {{ color:#567168; font-size:13px; }}
+      .khair-progress-track {{ height:10px; overflow:hidden; border-radius:99px; background:#D0E4DA; }}
+      .khair-progress-fill {{ height:100%; border-radius:inherit; background:linear-gradient(90deg,#0F766E,#48C99F,#D8B45C); }}
+      .khair-progress-layout {{ display:flex; align-items:center; gap:16px; }}
+      .khair-progress-ring {{ position:relative; display:grid; place-items:center; width:62px; height:62px; flex:0 0 62px;
+        --progress-color:#0F766E; --progress-track:#D0E4DA; border-radius:50%;
+        background:conic-gradient(var(--progress-color) var(--progress-angle),var(--progress-track) 0); }}
+      .khair-progress-ring::before {{ content:""; position:absolute; inset:7px; border-radius:50%; background:#F7FBF9; }}
+      .khair-progress-ring span {{ position:relative; color:#17312D; font-size:14px; font-weight:750; }}
+      .khair-progress-copy {{ flex:1; min-width:0; }}
+      @media(max-width:900px) {{ .khair-infographic-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}
+      @media(max-width:480px) {{ .khair-infographic-grid {{ gap:9px; }} .khair-infographic-card {{ min-height:120px; padding:13px; }} .khair-infographic-value {{ font-size:21px; }} }}
       @keyframes khair-heading-sweep {{ from {{ transform:translateX(-110%); }} to {{ transform:translateX(520%); }} }}
       @media (prefers-reduced-motion: reduce) {{ .khair-nav-icon, .khair-heading-accent span {{ animation:none; }} }}
       [data-testid="stAppViewContainer"] #members, [data-testid="stAppViewContainer"] #fund-ledger,
@@ -725,27 +834,27 @@ follow_up_count = int((unpaid_counts > group_limit).sum())
 selected_collection = float(
     monthly.loc[monthly["Month"] == selected_month, "Collected (BHD)"].iloc[0]
 )
-positions = gold_positions(gold_rates)
+gold_purchase_values: dict[int, float | None] = data["gold_purchase_values"]
+positions = gold_positions(gold_rates, gold_purchase_values)
 gold_total_cost = sum(item["Cost"] for item in positions)
 gold_total_value = sum(item["Value"] for item in positions)
 gold_total_pnl = sum(item["P/L"] for item in positions)
 
-st.caption("Group fund overview")
+st.subheader("Your fund, at a glance")
 st.caption(
     f"Connected to Google Sheets · refreshed "
     f"{data['loaded_at'].strftime('%d %b %Y at %H:%M')}"
 )
-
-with st.container(horizontal=True):
-    st.metric("Total collected", money(collected_ledger), border=True)
-    st.metric(
-        f"Collected · {month_label(selected_month)}",
-        money(selected_collection),
-        f"{paid_this_month} of {member_count} members",
-        border=True,
-    )
-    st.metric("Outstanding", money(due_amount), f"{due_this_month} members", border=True)
-    st.metric("Fund balance", money(balance) if balance is not None else "Not listed", border=True)
+render_infographic_summary(
+    total=collected_ledger,
+    monthly_total=selected_collection,
+    outstanding=due_amount,
+    balance=balance,
+    paid=paid_this_month,
+    member_count=member_count,
+    completion=completion,
+    month=selected_month,
+)
 
 render_section_nav()
 
@@ -753,6 +862,10 @@ with st.container():
     st.header(":material/dashboard: Overview", anchor="overview")
     render_section_accent()
     st.subheader("Gold portfolio")
+    st.caption(
+        "Purchase basis comes from the values beside Gold 22k and Gold 24k in the sheet. "
+        "After editing those cells, select Refresh data to recalculate profit and loss."
+    )
     if positions:
         rate_col, pnl_col = st.columns([1.7, 1], gap="medium")
         with rate_col:
@@ -775,10 +888,9 @@ with st.container():
                     f"{position['P/L']:+,.2f} BHD · {position['P/L %']:+.2f}%",
                     delta_color="normal",
                 )
-                cost_per_gram = position["Cost"] / position["Weight"]
                 st.caption(
-                    f"Rate: {money(position['Rate'])}/g · buy basis: "
-                    f"{money(cost_per_gram)}/g · cost: {money(position['Cost'])}"
+                    f"Live: {money(position['Rate'])}/g · sheet purchase rate: "
+                    f"{money(position['Purchase rate'])}/g · total cost: {money(position['Cost'])}"
                 )
         with st.container(horizontal=True, wrap=True):
             st.metric("Combined gold value", money(gold_total_value), border=True)
@@ -801,6 +913,15 @@ with st.container():
         )
     elif gold_error:
         st.warning(f"Live Bahrain rates are unavailable right now. {gold_error}")
+    elif any(gold_purchase_values.get(karat) is None for karat in (22, 24)):
+        missing_karats = [
+            f"Gold {karat}k" for karat in (22, 24) if gold_purchase_values.get(karat) is None
+        ]
+        st.warning(
+            "Add a numeric purchase value in the cell next to "
+            + " and ".join(missing_karats)
+            + " in the published sheet to calculate gold profit and loss."
+        )
     else:
         st.info("Live Bahrain gold rates are loading.")
 
@@ -810,7 +931,11 @@ with st.container():
             st.subheader("Collection trend")
             chart_data = monthly.copy()
             chart_data["Month label"] = chart_data["Month"].map(month_label)
-            wave_colors = ("#BCEBDD", "#48C99F", "#0F766E", "#D8B45C")
+            wave_colors = (
+                ("#DDF2E7", "#77C6A5", "#0F766E", "#D8B45C")
+                if not dark_mode
+                else ("#1A4942", "#24836B", "#40D0A8", "#D8B45C")
+            )
             base = alt.Chart(chart_data).encode(
                 x=alt.X("Month label:N", title=None, sort=chart_data["Month label"].tolist(), axis=alt.Axis(labelAngle=0)),
                 tooltip=[
@@ -841,8 +966,10 @@ with st.container():
             wave_line = base.mark_line(
                 interpolate="monotone", color=wave_colors[2], strokeWidth=3, point=True
             ).encode(y=alt.Y("Collected (BHD):Q", title="BHD", scale=alt.Scale(zero=True)))
+            chart_grid = "#E8EBEF" if not dark_mode else "#354253"
+            chart_text = "#667281" if not dark_mode else "#AAB4C0"
             collection_chart = (wave_fill + wave_line + target_rule).properties(height=300).configure_view(stroke=None).configure_axis(
-                gridColor="#e8eeec", labelColor="#718078", titleColor="#718078"
+                gridColor=chart_grid, labelColor=chart_text, titleColor=chart_text
             )
             st.altair_chart(
                 collection_chart,
@@ -1054,7 +1181,9 @@ with st.container():
                     f"{money(position['P/L'])} P/L"
                 )
         else:
-            summary_lines.append("Gold P/L: live rate unavailable")
+            summary_lines.append(
+                "Gold P/L unavailable: check the live rate and the Gold 22k / Gold 24k values in the sheet."
+            )
     if include_pending_names and pending_names:
         listed = pending_names[:20]
         suffix = f" (+{len(pending_names) - 20} more)" if len(pending_names) > 20 else ""
