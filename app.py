@@ -643,6 +643,18 @@ def render_section_accent() -> None:
     st.html('<div class="khair-heading-accent" aria-hidden="true"><span></span></div>')
 
 
+def render_infographic_tiles(tiles: list[tuple[str, str, str, str, str]]) -> None:
+    card_html = "".join(
+        '<article class="khair-infographic-card">'
+        f'<div class="khair-infographic-top"><span class="khair-infographic-label">{escape(label)}</span>'
+        f'<span class="khair-infographic-icon khair-icon-{tone}" aria-hidden="true">{icon}</span></div>'
+        f'<div class="khair-infographic-value">{escape(value)}</div>'
+        f'<div class="khair-infographic-hint">{escape(hint)}</div></article>'
+        for label, icon, value, hint, tone in tiles
+    )
+    st.html(f'<div class="khair-infographic-grid">{card_html}</div>')
+
+
 def render_infographic_summary(
     *, total: float, monthly_total: float, outstanding: float, balance: float | None,
     paid: int, member_count: int, completion: float, month: str,
@@ -655,16 +667,8 @@ def render_infographic_summary(
         ("Still outstanding", "!", money(outstanding), f"{due_count} members to follow up", "coral"),
         ("Fund balance", "◇", money(balance) if balance is not None else "Not listed", "Available fund balance", "gold"),
     ]
-    card_html = "".join(
-        '<article class="khair-infographic-card">'
-        f'<div class="khair-infographic-top"><span class="khair-infographic-label">{escape(label)}</span>'
-        f'<span class="khair-infographic-icon khair-icon-{tone}" aria-hidden="true">{icon}</span></div>'
-        f'<div class="khair-infographic-value">{escape(value)}</div>'
-        f'<div class="khair-infographic-hint">{escape(hint)}</div></article>'
-        for label, icon, value, hint, tone in cards
-    )
+    render_infographic_tiles(cards)
     st.html(
-        f'<div class="khair-infographic-grid">{card_html}</div>'
         '<section class="khair-progress-band" aria-label="Monthly contribution progress">'
         '<div class="khair-progress-layout">'
         f'<div class="khair-progress-ring" style="--progress-angle:{completion_pct * 3.6:.1f}deg"><span>{completion_pct}%</span></div>'
@@ -706,7 +710,7 @@ st.html(
         background:linear-gradient(90deg,#C8E5D7,#E8D6A7,#C8E5D7); }}
       .khair-heading-accent span {{ display:block; height:100%; width:22%; border-radius:inherit;
         background:linear-gradient(90deg,#0F766E,#41DAAB,#D8B45C); animation:khair-heading-sweep 6s ease-in-out infinite; }}
-      .khair-infographic-grid {{ display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin:14px 0; }}
+      .khair-infographic-grid {{ display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:14px; margin:14px 0; }}
       .khair-infographic-card {{ position:relative; min-height:132px; padding:17px 18px 15px; overflow:hidden;
         border:1px solid #D7E7DF; border-radius:18px; background:#FFFFFF; color:#17312D;
         box-shadow:0 6px 18px #123D310B; }}
@@ -736,8 +740,7 @@ st.html(
       .khair-progress-ring::before {{ content:""; position:absolute; inset:7px; border-radius:50%; background:#F7FBF9; }}
       .khair-progress-ring span {{ position:relative; color:#17312D; font-size:14px; font-weight:750; }}
       .khair-progress-copy {{ flex:1; min-width:0; }}
-      @media(max-width:900px) {{ .khair-infographic-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); }} }}
-      @media(max-width:480px) {{ .khair-infographic-grid {{ gap:9px; }} .khair-infographic-card {{ min-height:120px; padding:13px; }} .khair-infographic-value {{ font-size:21px; }} }}
+      @media(max-width:480px) {{ .khair-infographic-grid {{ grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }} .khair-infographic-card {{ min-height:120px; padding:13px; }} .khair-infographic-value {{ font-size:21px; }} }}
       @keyframes khair-heading-sweep {{ from {{ transform:translateX(-110%); }} to {{ transform:translateX(520%); }} }}
       @media (prefers-reduced-motion: reduce) {{ .khair-nav-icon, .khair-heading-accent span {{ animation:none; }} }}
       [data-testid="stAppViewContainer"] #members, [data-testid="stAppViewContainer"] #fund-ledger,
@@ -881,32 +884,44 @@ with st.container():
             )
         gold_cols = st.columns(2, gap="medium")
         for column, position in zip(gold_cols, positions):
-            with column.container(border=True):
-                st.metric(
-                    f"{position['Holding']} · {position['Weight']:g} g",
-                    money(position["Value"]),
-                    f"{position['P/L']:+,.2f} BHD · {position['P/L %']:+.2f}%",
-                    delta_color="normal",
+            with column:
+                pnl_tone = "emerald" if position["P/L"] >= 0 else "coral"
+                pnl_icon = "↗" if position["P/L"] >= 0 else "↘"
+                render_infographic_tiles(
+                    [
+                        (
+                            f"{position['Holding']} · {position['Weight']:g} g",
+                            pnl_icon,
+                            money(position["Value"]),
+                            f"{position['P/L']:+,.2f} BHD · {position['P/L %']:+.2f}% vs purchase cost",
+                            pnl_tone,
+                        )
+                    ]
                 )
                 st.caption(
                     f"Live: {money(position['Rate'])}/g · sheet purchase rate: "
                     f"{money(position['Purchase rate'])}/g · total cost: {money(position['Cost'])}"
                 )
-        with st.container(horizontal=True, wrap=True):
-            st.metric("Combined gold value", money(gold_total_value), border=True)
-            st.metric(
-                "Combined gold P/L",
-                f"BHD {gold_total_pnl:+,.2f}",
-                delta=f"{gold_total_pnl / gold_total_cost:+.2%}" if gold_total_cost else None,
-                border=True,
-            )
-            st.metric(
-                "Gold P/L per member · equal share",
-                f"BHD {gold_total_pnl / member_count:+,.2f}" if member_count else "Not available",
-                delta=f"Across {member_count} members" if member_count else None,
-                delta_color="off",
-                border=True,
-            )
+        combined_tone = "emerald" if gold_total_pnl >= 0 else "coral"
+        render_infographic_tiles(
+            [
+                ("Combined gold value", "◉", money(gold_total_value), "Current Bahrain rate estimate", "gold"),
+                (
+                    "Combined gold P/L",
+                    "↗" if gold_total_pnl >= 0 else "↘",
+                    f"BHD {gold_total_pnl:+,.2f}",
+                    f"{gold_total_pnl / gold_total_cost:+.2%} against purchase cost" if gold_total_cost else "Purchase basis unavailable",
+                    combined_tone,
+                ),
+                (
+                    "Gold P/L per member",
+                    "◇",
+                    f"BHD {gold_total_pnl / member_count:+,.2f}" if member_count else "Not available",
+                    f"Equal share across {member_count} members" if member_count else "Member count unavailable",
+                    "blue",
+                ),
+            ]
+        )
         st.caption(
             f"Equal-share estimate divides the combined P/L by {member_count} members. "
             "Reference-rate estimate; shop buyback prices, spreads, and workmanship can differ."
@@ -984,7 +999,9 @@ with st.container():
         with st.container(border=True):
             st.subheader(f"{month_label(selected_month)} progress")
             st.progress(completion, text=f"{completion:.0%} collected · {paid_this_month}/{member_count}")
-            st.metric("Still due", money(due_amount), f"{due_this_month} members")
+            render_infographic_tiles(
+                [("Still due", "!", money(due_amount), f"{due_this_month} members", "coral")]
+            )
             st.caption(f"{follow_up_count} members have more than {group_limit} unpaid months through {month_label(selected_month)}.")
 
     with st.container(border=True):
@@ -1093,11 +1110,17 @@ with st.container():
         ("Kuri", "kuri"),
         ("Rounding", "rounding"),
     ]
-    for start in range(0, len(ledger_items), 4):
-        with st.container(horizontal=True):
-            for label, key in ledger_items[start : start + 4]:
-                value = ledger.get(key)
-                st.metric(label, money(value) if value is not None else "Not listed", border=True)
+    ledger_tiles = [
+        (
+            label,
+            "◇",
+            money(ledger[key]) if ledger.get(key) is not None else "Not listed",
+            "From the shared fund ledger",
+            "emerald",
+        )
+        for label, key in ledger_items
+    ]
+    render_infographic_tiles(ledger_tiles)
 
     st.subheader("Monthly totals")
     monthly_view = monthly.assign(Month=monthly["Month"].map(month_label))
