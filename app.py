@@ -150,6 +150,7 @@ def parse_sheet(text: str) -> dict:
         "reg. fee",
         "meeting exp.",
         "total collection",
+        "total outstanding",
         "gold",
         "kuri",
         "rounding",
@@ -356,6 +357,7 @@ def make_status_image(
     paid_count: int,
     member_count: int,
     due_amount: float,
+    total_outstanding: float | None,
     balance: float | None,
     positions: list[dict],
     pending_details: list[dict],
@@ -377,7 +379,8 @@ def make_status_image(
         pending_rows.append((detail, month_lines, row_height))
     gold_count = len(positions) if positions else 1
     pending_content_height = sum(row[2] + 10 for row in pending_rows)
-    height = max(1120, 950 + gold_count * 110 + pending_content_height)
+    card_rows = (5 + 1) // 2
+    height = max(1120, 950 + gold_count * 110 + pending_content_height + max(0, card_rows - 2) * 138)
     palette = {
         "dark": {
             "background": "#0D1822", "hero": "#102B31", "logo_back": "#0B1822",
@@ -435,7 +438,8 @@ def make_status_image(
     cards = [
         ("TOTAL COLLECTED", money(total_collected), teal),
         ("THIS MONTH", money(month_collected), "#527C96"),
-        ("OUTSTANDING", money(due_amount), red),
+        ("CURRENT MONTH OUTSTANDING", money(due_amount), red),
+        ("TOTAL FUND OUTSTANDING", money(total_outstanding) if total_outstanding is not None else "Not listed", gold),
         ("FUND BALANCE", money(balance) if balance is not None else "Not listed", gold),
     ]
     for index, (label, value, accent) in enumerate(cards):
@@ -443,10 +447,12 @@ def make_status_image(
         cy = y + (index // 2) * 138
         draw.rounded_rectangle((x, cy, x + 544, cy + 116), radius=22, fill=card, outline=edge, width=2)
         draw.rounded_rectangle((x + 19, cy + 24, x + 26, cy + 91), radius=4, fill=accent)
+        draw.ellipse((x + 473, cy + 67, x + 511, cy + 105), outline=accent, width=2)
+        draw.ellipse((x + 483, cy + 77, x + 501, cy + 95), outline=accent, width=2)
         draw.text((x + 44, cy + 20), label, font=muted_font, fill=muted)
         draw.text((x + 44, cy + 53), value, font=section_font, fill=white)
 
-    y += 302
+    y += 26 + card_rows * 138
     draw.rounded_rectangle((44, y, width - 44, y + 116), radius=22, fill=palette["progress_card"], outline=palette["progress_outline"], width=2)
     draw.text((72, y + 20), "MONTHLY COLLECTION", font=muted_font, fill=palette["progress_muted"])
     draw.text((72, y + 52), f"{paid_count} of {member_count} members paid", font=section_font, fill=white)
@@ -656,7 +662,8 @@ def render_infographic_tiles(tiles: list[tuple[str, str, str, str, str]]) -> Non
 
 
 def render_infographic_summary(
-    *, total: float, monthly_total: float, outstanding: float, balance: float | None,
+    *, total: float, monthly_total: float, current_month_outstanding: float,
+    total_outstanding: float | None, balance: float | None,
     paid: int, member_count: int, completion: float, month: str,
 ) -> None:
     completion_pct = min(100, max(0, round(completion * 100)))
@@ -664,7 +671,14 @@ def render_infographic_summary(
     cards = [
         ("Total contributions", "✦", money(total), "Collected across the fund", "emerald"),
         (f"{month_label(month)} collected", "◷", money(monthly_total), f"{paid} members have paid", "blue"),
-        ("Still outstanding", "!", money(outstanding), f"{due_count} members to follow up", "coral"),
+        ("Current month outstanding", "!", money(current_month_outstanding), f"{due_count} members to follow up", "coral"),
+        (
+            "Total outstanding in fund",
+            "↘",
+            money(total_outstanding) if total_outstanding is not None else "Not listed",
+            "From the Total Outstanding sheet row",
+            "gold",
+        ),
         ("Fund balance", "◇", money(balance) if balance is not None else "Not listed", "Available fund balance", "gold"),
     ]
     render_infographic_tiles(cards)
@@ -838,6 +852,7 @@ selected_collection = float(
     monthly.loc[monthly["Month"] == selected_month, "Collected (BHD)"].iloc[0]
 )
 gold_purchase_values: dict[int, float | None] = data["gold_purchase_values"]
+total_outstanding = ledger.get("total outstanding")
 positions = gold_positions(gold_rates, gold_purchase_values)
 gold_total_cost = sum(item["Cost"] for item in positions)
 gold_total_value = sum(item["Value"] for item in positions)
@@ -851,7 +866,8 @@ st.caption(
 render_infographic_summary(
     total=collected_ledger,
     monthly_total=selected_collection,
-    outstanding=due_amount,
+    current_month_outstanding=due_amount,
+    total_outstanding=total_outstanding,
     balance=balance,
     paid=paid_this_month,
     member_count=member_count,
@@ -1000,7 +1016,7 @@ with st.container():
             st.subheader(f"{month_label(selected_month)} progress")
             st.progress(completion, text=f"{completion:.0%} collected · {paid_this_month}/{member_count}")
             render_infographic_tiles(
-                [("Still due", "!", money(due_amount), f"{due_this_month} members", "coral")]
+                [("Current month outstanding", "!", money(due_amount), f"{due_this_month} members", "coral")]
             )
             st.caption(f"{follow_up_count} members have more than {group_limit} unpaid months through {month_label(selected_month)}.")
 
@@ -1104,6 +1120,7 @@ with st.container():
     ledger_items = [
         ("Balance", "balance"),
         ("Total collection", "total collection"),
+        ("Total outstanding", "total outstanding"),
         ("Registration fees", "reg. fee"),
         ("Meeting expenses", "meeting exp."),
         ("Gold", "gold"),
@@ -1184,7 +1201,8 @@ with st.container():
         f"*Khair group update · {month_label(selected_month)}*",
         f"Total contributions: {money(collected_ledger)}",
         f"This month: {paid_this_month}/{member_count} members paid ({money(selected_collection)})",
-        f"Outstanding this month: {due_this_month} members · {money(due_amount)}",
+        f"Current month outstanding: {due_this_month} members · {money(due_amount)}",
+        f"Total outstanding in fund: {money(total_outstanding) if total_outstanding is not None else 'Not listed'}",
         f"Fund balance: {money(balance) if balance is not None else 'Not listed'}",
     ]
     if include_gold:
@@ -1235,6 +1253,7 @@ with st.container():
                 paid_count=paid_this_month,
                 member_count=member_count,
                 due_amount=due_amount,
+                total_outstanding=total_outstanding,
                 balance=balance,
                 positions=positions if include_gold else [],
                 pending_details=pending_details if include_pending_names else [],
@@ -1368,6 +1387,7 @@ with st.container():
                     paid_count=paid_this_month,
                     member_count=member_count,
                     due_amount=due_amount,
+                    total_outstanding=total_outstanding,
                     balance=balance,
                     positions=positions if include_gold else [],
                     pending_details=pending_details if include_pending_names else [],
