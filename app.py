@@ -3,7 +3,6 @@ from __future__ import annotations
 import csv
 import io
 import base64
-from email.message import EmailMessage
 from html import escape
 import re
 import textwrap
@@ -95,7 +94,6 @@ def parse_sheet(text: str) -> dict:
         ),
         None,
     )
-
     members: list[dict] = []
     next_row = header_index + 1
     for row in rows[next_row:]:
@@ -146,6 +144,7 @@ def parse_sheet(text: str) -> dict:
 
     ledger: dict[str, float] = {}
     gold_purchase_values: dict[int, float | None] = {22: None, 24: None}
+    iban_no = ""
     known_labels = (
         "reg. fee",
         "meeting exp.",
@@ -158,6 +157,8 @@ def parse_sheet(text: str) -> dict:
     )
     for row in rows[next_row:]:
         for index, cell in enumerate(row):
+            if re.fullmatch(r"iban\s*(?:no\.?|number)?\s*:?", cell.strip(), re.IGNORECASE):
+                iban_no = next((candidate.strip() for candidate in row[index + 1 :] if candidate.strip()), iban_no)
             gold_match = re.search(r"\bgold\s*(22|24)\s*k\b", cell.strip(), re.IGNORECASE)
             if gold_match:
                 purchase_value = next(
@@ -207,6 +208,8 @@ def parse_sheet(text: str) -> dict:
         "gold_purchase_values": gold_purchase_values,
         "has_phone_column": phone_index is not None,
         "has_email_column": email_index is not None,
+        "iban_no": iban_no,
+        "has_iban_value": bool(iban_no),
         "loaded_at": datetime.now().astimezone(),
     }
 
@@ -361,6 +364,7 @@ def make_status_image(
     balance: float | None,
     positions: list[dict],
     pending_details: list[dict],
+    iban_no: str = "",
     appearance: str = "dark",
 ) -> bytes:
     """Create a high-contrast Khair-branded WhatsApp summary card."""
@@ -380,7 +384,7 @@ def make_status_image(
     gold_count = len(positions) if positions else 1
     pending_content_height = sum(row[2] + 10 for row in pending_rows)
     card_rows = (5 + 1) // 2
-    height = max(1120, 950 + gold_count * 110 + pending_content_height + max(0, card_rows - 2) * 138)
+    height = max(1240, 1080 + gold_count * 110 + pending_content_height + max(0, card_rows - 2) * 138)
     palette = {
         "dark": {
             "background": "#0D1822", "hero": "#102B31", "logo_back": "#0B1822",
@@ -511,43 +515,17 @@ def make_status_image(
     else:
         draw.rounded_rectangle((44, y, width - 44, y + 88), radius=18, fill=palette["up_to_date"], outline=palette["progress_outline"], width=2)
         draw.text((72, y + 29), "ALL CONTRIBUTIONS ARE UP TO DATE", font=body_font, fill=teal)
+        y += 100
+
+    draw.rounded_rectangle((44, y + 8, width - 44, y + 104), radius=18, fill=card, outline=palette["progress_outline"], width=2)
+    draw.text((72, y + 24), "PAYMENT DETAILS", font=muted_font, fill=palette["hero_muted"])
+    draw.text((72, y + 52), f"IBAN NO: {iban_no or 'Not listed in the sheet'}", font=body_font, fill=white)
 
     footer = f"KHAIR GROUP FUND  ·  Rates: Gulf News Bahrain  ·  Generated {datetime.now().astimezone().strftime('%d %b %Y, %H:%M')}"
     draw.text((54, height - 48), footer, font=muted_font, fill=palette["footer"])
     output = io.BytesIO()
     image.save(output, format="PNG", optimize=True)
     return output.getvalue()
-
-
-def make_inline_email_draft(
-    *, recipients: list[str], subject: str, body: str, image_bytes: bytes
-) -> bytes:
-    """Build a reviewable .eml draft with the Khair summary embedded inline."""
-    message = EmailMessage()
-    message["Bcc"] = ", ".join(recipients)
-    message["Subject"] = subject
-    message.set_content(body)
-    html_body = (
-        '<html><body style="margin:0;background:#f2f7f5;padding:24px;'
-        'font-family:Arial,sans-serif;color:#17312d">'
-        '<div style="max-width:760px;margin:auto">'
-        f'<p style="font-size:16px;line-height:1.6;white-space:pre-line">{escape(body)}</p>'
-        '<p style="font-weight:bold;color:#0f766e">Khair group fund update</p>'
-        '<img src="cid:khair-summary" alt="Khair group fund summary" '
-        'style="display:block;width:100%;max-width:720px;height:auto;border-radius:16px">'
-        '</div></body></html>'
-    )
-    message.add_alternative(html_body, subtype="html")
-    html_part = message.get_payload()[-1]
-    html_part.add_related(
-        image_bytes,
-        maintype="image",
-        subtype="png",
-        cid="<khair-summary>",
-        filename="khair-group-update.png",
-        disposition="inline",
-    )
-    return message.as_bytes()
 
 
 def render_image_share_button(image_bytes: bytes, *, filename: str, text: str) -> None:
@@ -1194,6 +1172,8 @@ with st.container():
     st.header(":material/campaign: Share & reminders", anchor="share-reminders")
     render_section_accent()
     st.subheader("Share a group update")
+    if not data["has_iban_value"]:
+        st.info("Add a row labeled `IBAN No` to the Khair sheet, put the shared payment IBAN in the next cell, then refresh the sheet.")
     st.caption(
         "Share a clear text update or a branded infographic. Image sharing opens your device’s share menu, "
         "where you can choose WhatsApp; you can also download the image."
@@ -1237,6 +1217,8 @@ with st.container():
     def pl_marker(value: float) -> str:
         return "🔻" if value < 0 else "🟢"
 
+    common_iban = data.get("iban_no", "")
+
     summary_lines = [
         f"🌿 *KHAIR GROUP FUND | {month_label(selected_month)}*",
         "Hi, Good Day!",
@@ -1248,6 +1230,10 @@ with st.container():
         f"📋 Total outstanding in fund: {money(total_outstanding) if total_outstanding is not None else 'Not listed'}",
         f"🏦 Fund balance: {pl_marker(balance) if balance is not None else 'ℹ️'} {money(balance) if balance is not None else 'Not listed'}",
     ]
+    if common_iban:
+        summary_lines.append(f"💳 *IBAN No: {common_iban}*")
+    else:
+        summary_lines.append("💳 *IBAN No: Not listed in the sheet*")
     if include_gold:
         if positions:
             summary_lines.append(
@@ -1286,7 +1272,7 @@ with st.container():
                 "Message preview · edit before opening WhatsApp",
                 value=summary_text,
                 height=240,
-                key=f"summary_message_v2_{selected_month}_{include_gold}_{include_pending_names}",
+                key=f"summary_message_v3_{hash(summary_text)}",
             )
             st.link_button(
                 "Open WhatsApp draft",
@@ -1305,8 +1291,9 @@ with st.container():
                 total_outstanding=total_outstanding,
                 balance=balance,
                 positions=positions if include_gold else [],
-                pending_details=pending_details if include_pending_names else [],
-                appearance=image_appearance.lower(),
+            pending_details=pending_details if include_pending_names else [],
+            iban_no=common_iban,
+            appearance=image_appearance.lower(),
             )
             st.image(image_bytes, alt="Khair group update card for WhatsApp sharing")
             st.download_button(
@@ -1343,6 +1330,7 @@ with st.container():
             if float(member_record[month]) <= 0
         ]
         reminder_due = len(unpaid_month_labels) * fee
+        member_iban = common_iban
         default_reminder = (
             f"🌿 *Khair Group Fund | Contribution Reminder*\n\n"
             f"Hi, Good Day! {reminder_member},\n\n"
@@ -1350,6 +1338,7 @@ with st.container():
             f"📅 Months pending: {', '.join(unpaid_month_labels)}\n"
             f"🧾 Number of months: {len(unpaid_month_labels)}\n"
             f"💰 Amount due: {money(reminder_due)}\n\n"
+            f"💳 *IBAN No: {member_iban or 'Not listed in the sheet'}*\n\n"
             "If you have already paid, please disregard this message and share the payment details so we can update our record.\n\n"
             "Thanks and Regards,\nKhair Group Fund"
         )
@@ -1363,7 +1352,7 @@ with st.container():
             "Reminder message · edit before opening WhatsApp",
             value=default_reminder,
             height=140,
-            key=f"reminder_text_v2_{selected_month}_{reminder_member}",
+            key=f"reminder_text_v3_{hash(default_reminder)}",
         )
         normalized_phone = normalize_phone(reminder_phone)
         if normalized_phone:
@@ -1381,7 +1370,7 @@ with st.container():
     st.subheader("One-shot email reminder")
     st.caption(
         "Prepare one BCC email for pending members with addresses in the sheet. "
-        "The email draft includes the current-month infographic inline; review and send it from your email app."
+        "The button opens your email composer with the reminder and payment details ready; review and send it there."
     )
     if not data["has_email_column"]:
         st.info(
@@ -1419,6 +1408,7 @@ with st.container():
                 default=list(recipient_options),
                 key=f"email_recipients_{selected_month}",
             )
+            email_iban_text = common_iban or "Not listed in the sheet"
             email_subject = st.text_input(
                 "Email subject",
                 value=f"Khair contribution reminder · {month_label(selected_month)}",
@@ -1434,47 +1424,34 @@ with st.container():
                     "📌 Please review your payment record and arrange any pending contribution when convenient.\n"
                     "✅ If you have already paid, please disregard this reminder and share the payment details "
                     "so we can update our records.\n\n"
-                    "The current month fund infographic is included below for a quick overview.\n\n"
+                    "📊 FUND SUMMARY\n"
+                    f"💰 Total contributions: {money(collected_ledger)}\n"
+                    f"📅 This month collected: {money(selected_collection)} ({paid_this_month}/{member_count} members)\n"
+                    f"⏳ Current month outstanding: {due_this_month} members, {money(due_amount)}\n"
+                    f"📋 Total outstanding in fund: {money(total_outstanding) if total_outstanding is not None else 'Not listed'}\n"
+                    f"🏦 Fund balance: {money(balance) if balance is not None else 'Not listed'}\n"
+                    f"🪙 Gold profit or loss: {money(gold_total_pnl)}\n\n"
+                    f"💳 IBAN NO: {email_iban_text}\n\n"
                     "Thanks and Regards,\nKhair Group Fund"
                 ),
                 height=170,
-                key=f"email_body_{selected_month}",
+                key=f"email_body_v2_{hash((email_iban_text, collected_ledger, selected_collection, due_amount, total_outstanding, balance, gold_total_pnl))}",
             )
             if selected_recipients:
-                email_image = make_status_image(
-                    month=selected_month,
-                    total_collected=collected_ledger,
-                    month_collected=selected_collection,
-                    paid_count=paid_this_month,
-                    member_count=member_count,
-                    due_amount=due_amount,
-                    total_outstanding=total_outstanding,
-                    balance=balance,
-                    positions=positions if include_gold else [],
-                    pending_details=pending_details if include_pending_names else [],
-                    appearance=image_appearance.lower(),
-                )
                 email_recipients = [recipient_options[label] for label in selected_recipients]
-                email_draft = make_inline_email_draft(
-                    recipients=email_recipients,
-                    subject=email_subject,
-                    body=email_body,
-                    image_bytes=email_image,
+                mailto_url = (
+                    f"mailto:?bcc={quote(','.join(email_recipients))}"
+                    f"&subject={quote(email_subject)}&body={quote(email_body)}"
                 )
-                st.download_button(
+                st.link_button(
                     f"Send email · {len(selected_recipients)} member(s)",
-                    data=email_draft,
-                    file_name=f"khair-reminder-{selected_month.lower()}.eml",
-                    mime="message/rfc822",
+                    mailto_url,
                     icon=":material/send:",
                     type="primary",
                 )
                 st.caption(
-                    f"Creates one BCC email draft for {len(email_recipients)} selected member(s), with the current-month infographic embedded in the message. "
-                    "Open the draft in your email app, review it, then press Send."
+                    f"Opens a BCC email for {len(email_recipients)} selected member(s). Review it in your email app and press Send."
                 )
-                with st.expander("Preview image included in the email"):
-                    st.image(email_image, alt="Summary image embedded in the email reminder")
             else:
                 st.caption("Select at least one member to prepare the email draft.")
 
