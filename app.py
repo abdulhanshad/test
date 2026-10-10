@@ -550,6 +550,43 @@ def make_inline_email_draft(
     return message.as_bytes()
 
 
+def render_image_share_button(image_bytes: bytes, *, filename: str, text: str) -> None:
+    """Offer the infographic through the browser's native share sheet (WhatsApp is a target)."""
+    image_data = base64.b64encode(image_bytes).decode("ascii")
+    safe_filename = escape(filename, quote=True)
+    safe_text = escape(text, quote=True)
+    st.html(
+        f'''<div style="margin: .25rem 0 .5rem">
+<button id="khair-share-image" type="button" style="border:0;border-radius:10px;padding:.65rem 1rem;
+background:#087f67;color:#fff;font:600 14px sans-serif;cursor:pointer;">
+↗ Share image to WhatsApp
+</button>
+<span id="khair-share-status" role="status" style="margin-left:.6rem;font:13px sans-serif;color:#60766e"></span>
+<script>
+(() => {{
+ const button = document.getElementById('khair-share-image');
+ const status = document.getElementById('khair-share-status');
+ button.addEventListener('click', async () => {{
+   try {{
+     const raw = atob('{image_data}');
+     const bytes = Uint8Array.from(raw, c => c.charCodeAt(0));
+     const file = new File([bytes], '{safe_filename}', {{type:'image/png'}});
+     if (!navigator.share || !navigator.canShare || !navigator.canShare({{files:[file]}})) {{
+       status.textContent = 'Direct image sharing is not supported here. Download the image and attach it in WhatsApp.';
+       return;
+     }}
+     await navigator.share({{files:[file], title:'Khair group update', text:'{safe_text}'}});
+     status.textContent = 'Choose WhatsApp in the share menu.';
+   }} catch (error) {{
+     status.textContent = error.name === 'AbortError' ? 'Share cancelled.' : 'Sharing failed. Download the image and attach it in WhatsApp.';
+   }}
+ }});
+}})();
+</script></div>''',
+        unsafe_allow_javascript=True,
+    )
+
+
 def normalize_phone(value: str) -> str | None:
     digits = re.sub(r"\D", "", value)
     if digits.startswith("00"):
@@ -1158,8 +1195,8 @@ with st.container():
     render_section_accent()
     st.subheader("Share a group update")
     st.caption(
-        "Choose text to open a pre-filled WhatsApp draft, or download a status image "
-        "and attach it to your group. The dashboard never sends a message automatically."
+        "Share a clear text update or a branded infographic. Image sharing opens your device’s share menu, "
+        "where you can choose WhatsApp; you can also download the image."
     )
     share_format = st.segmented_control(
         "Share format",
@@ -1197,38 +1234,50 @@ with st.container():
             }
         )
     pending_details.sort(key=lambda item: (-item["month_count"], item["name"].lower()))
+    def pl_marker(value: float) -> str:
+        return "🔻" if value < 0 else "🟢"
+
     summary_lines = [
-        f"*Khair group update · {month_label(selected_month)}*",
-        f"Total contributions: {money(collected_ledger)}",
-        f"This month: {paid_this_month}/{member_count} members paid ({money(selected_collection)})",
-        f"Current month outstanding: {due_this_month} members · {money(due_amount)}",
-        f"Total outstanding in fund: {money(total_outstanding) if total_outstanding is not None else 'Not listed'}",
-        f"Fund balance: {money(balance) if balance is not None else 'Not listed'}",
+        f"🌿 *KHAIR GROUP FUND | {month_label(selected_month)}*",
+        "Hi, Good Day!",
+        "",
+        "📊 *FUND SUMMARY*",
+        f"💰 Total contributions: {money(collected_ledger)}",
+        f"📅 This month collected: {money(selected_collection)} ({paid_this_month}/{member_count} members)",
+        f"⏳ Current month outstanding: {due_this_month} members, {money(due_amount)}",
+        f"📋 Total outstanding in fund: {money(total_outstanding) if total_outstanding is not None else 'Not listed'}",
+        f"🏦 Fund balance: {pl_marker(balance) if balance is not None else 'ℹ️'} {money(balance) if balance is not None else 'Not listed'}",
     ]
     if include_gold:
         if positions:
             summary_lines.append(
-                f"Gold P/L estimate: {money(gold_total_pnl)} "
-                f"(value {money(gold_total_value)} · cost {money(gold_total_cost)})"
+                f"🪙 Gold profit or loss: {pl_marker(gold_total_pnl)} {money(gold_total_pnl)} "
+                f"(value {money(gold_total_value)}, cost {money(gold_total_cost)})"
             )
             if member_count:
+                member_gold_pnl = gold_total_pnl / member_count
                 summary_lines.append(
-                    f"Equal-share gold P/L estimate per member: "
-                    f"BHD {gold_total_pnl / member_count:+,.2f}"
+                    f"👤 Estimated gold share per member: {pl_marker(member_gold_pnl)} "
+                    f"BHD {member_gold_pnl:+,.2f}"
                 )
             for position in positions:
                 summary_lines.append(
-                    f"{position['Holding']}: {position['Weight']:g} g · "
-                    f"{money(position['P/L'])} P/L"
+                    f"{pl_marker(float(position['P/L']))} {position['Holding']}: "
+                    f"{position['Weight']:g} g, {money(position['P/L'])}"
                 )
         else:
             summary_lines.append(
-                "Gold P/L unavailable: check the live rate and the Gold 22k / Gold 24k values in the sheet."
+                "🪙 Gold P/L is unavailable. Please check the live rate and Gold 22k / Gold 24k values in the sheet."
             )
     if include_pending_names and pending_names:
-        listed = pending_names[:20]
-        suffix = f" (+{len(pending_names) - 20} more)" if len(pending_names) > 20 else ""
-        summary_lines.append("Pending through this month: " + ", ".join(listed) + suffix)
+        listed = [
+            f"{detail['name']} ({detail['month_count']} "
+            f"{'month' if detail['month_count'] == 1 else 'months'})"
+            for detail in pending_details[:20]
+        ]
+        suffix = f" (+{len(pending_details) - 20} more)" if len(pending_details) > 20 else ""
+        summary_lines.append("\n⏳ *PENDING THROUGH THIS MONTH*\n👥 " + ", ".join(listed) + suffix)
+    summary_lines.extend(["", "Thanks and Regards,", "Khair Group Fund"])
     summary_text = "\n".join(summary_lines)
 
     with share_col:
@@ -1237,7 +1286,7 @@ with st.container():
                 "Message preview · edit before opening WhatsApp",
                 value=summary_text,
                 height=240,
-                key=f"summary_message_{selected_month}_{include_gold}_{include_pending_names}",
+                key=f"summary_message_v2_{selected_month}_{include_gold}_{include_pending_names}",
             )
             st.link_button(
                 "Open WhatsApp draft",
@@ -1268,7 +1317,12 @@ with st.container():
                 icon=":material/download:",
                 type="primary",
             )
-            st.caption("After downloading, attach the PNG in your WhatsApp group.")
+            render_image_share_button(
+                image_bytes,
+                filename=f"khair-update-{selected_month.lower()}.png",
+                text=f"Khair Group Fund update | {month_label(selected_month)}",
+            )
+            st.caption("Your device’s share menu may list WhatsApp. On unsupported browsers, use Download status image and attach it manually.")
 
     st.subheader("Personal payment reminder")
     if pending_names:
@@ -1290,10 +1344,14 @@ with st.container():
         ]
         reminder_due = len(unpaid_month_labels) * fee
         default_reminder = (
-            f"Assalamu alaikum {reminder_member}, a gentle reminder from Khair about "
-            f"your contribution for {', '.join(unpaid_month_labels)} "
-            f"({len(unpaid_month_labels)} month(s), {money(reminder_due)}). "
-            "Kindly pay when convenient. Jazakallah khair."
+            f"🌿 *Khair Group Fund | Contribution Reminder*\n\n"
+            f"Hi, Good Day! {reminder_member},\n\n"
+            "A friendly reminder that our record shows the following contribution(s) pending:\n"
+            f"📅 Months pending: {', '.join(unpaid_month_labels)}\n"
+            f"🧾 Number of months: {len(unpaid_month_labels)}\n"
+            f"💰 Amount due: {money(reminder_due)}\n\n"
+            "If you have already paid, please disregard this message and share the payment details so we can update our record.\n\n"
+            "Thanks and Regards,\nKhair Group Fund"
         )
         reminder_phone = st.text_input(
             "WhatsApp number",
@@ -1305,7 +1363,7 @@ with st.container():
             "Reminder message · edit before opening WhatsApp",
             value=default_reminder,
             height=140,
-            key=f"reminder_text_{selected_month}_{reminder_member}",
+            key=f"reminder_text_v2_{selected_month}_{reminder_member}",
         )
         normalized_phone = normalize_phone(reminder_phone)
         if normalized_phone:
@@ -1323,7 +1381,7 @@ with st.container():
     st.subheader("One-shot email reminder")
     st.caption(
         "Prepare one BCC email for pending members with addresses in the sheet. "
-        "It opens in your email app for review; the dashboard does not send it."
+        "The email draft includes the current-month infographic inline; review and send it from your email app."
     )
     if not data["has_email_column"]:
         st.info(
@@ -1369,12 +1427,15 @@ with st.container():
             email_body = st.text_area(
                 "Email message · review before sending",
                 value=(
-                    "Assalamu alaikum,\n\n"
-                    f"This is a gentle reminder that our records show one or more monthly contributions "
-                    f"outstanding through {month_label(selected_month)}. Please check your individual "
-                    "payment record and arrange any pending contribution when convenient.\n\n"
-                    "If you have already paid, please disregard this note and share the payment details "
-                    "so we can update the record.\n\nJazakallah khair,\nKhair Group Fund"
+                    f"🌿 KHAIR GROUP FUND | {month_label(selected_month)}\n\n"
+                    "Hi, Good Day!\n\n"
+                    "This is a friendly reminder that our records show one or more monthly contributions "
+                    f"pending through {month_label(selected_month)}.\n\n"
+                    "📌 Please review your payment record and arrange any pending contribution when convenient.\n"
+                    "✅ If you have already paid, please disregard this reminder and share the payment details "
+                    "so we can update our records.\n\n"
+                    "The current month fund infographic is included below for a quick overview.\n\n"
+                    "Thanks and Regards,\nKhair Group Fund"
                 ),
                 height=170,
                 key=f"email_body_{selected_month}",
@@ -1401,26 +1462,16 @@ with st.container():
                     image_bytes=email_image,
                 )
                 st.download_button(
-                    f"Download email draft · {len(selected_recipients)} member(s)",
+                    f"Send email · {len(selected_recipients)} member(s)",
                     data=email_draft,
                     file_name=f"khair-reminder-{selected_month.lower()}.eml",
                     mime="message/rfc822",
-                    icon=":material/mail:",
+                    icon=":material/send:",
                     type="primary",
                 )
-                email_bcc = ",".join(email_recipients)
-                mailto_url = (
-                    f"mailto:?bcc={quote(email_bcc)}&subject={quote(email_subject)}"
-                    f"&body={quote(email_body)}"
-                )
-                st.link_button(
-                    "Send email · open composer",
-                    mailto_url,
-                    icon=":material/send:",
-                )
                 st.caption(
-                    "The .eml draft contains the summary image inline. The composer button fills a text-only "
-                    "email; review it and press Send in your mail app."
+                    f"Creates one BCC email draft for {len(email_recipients)} selected member(s), with the current-month infographic embedded in the message. "
+                    "Open the draft in your email app, review it, then press Send."
                 )
                 with st.expander("Preview image included in the email"):
                     st.image(email_image, alt="Summary image embedded in the email reminder")
